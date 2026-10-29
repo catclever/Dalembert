@@ -2,7 +2,10 @@
 
 source "https://rubygems.org"
 
+# Core Descartes Ecosystem
+gem "descartes", github: "catclever/Descartes"
 gem "descartes-produit", github: "catclever/descartes-produit"
+
 gem "ruby_llm"
 gem "llm_json"
 
