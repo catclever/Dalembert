@@ -1,0 +1,62 @@
+#!/usr/bin/env ruby
+# frozen_string_literal: true
+
+require "optparse"
+require "logger"
+
+# Add lib directory to load path
+$LOAD_PATH.unshift(File.expand_path("../lib", __dir__))
+
+require "dalembert"
+require "descartes"
+
+options = {
+  profile: "default",
+  max_turns: 5,
+  job: "Describe what Descartes framework does by looking at catclever/Descartes."
+}
+
+OptionParser.new do |opts|
+  opts.banner = "Usage: dalembert [options]"
+
+  opts.on("-j", "--job JOB", "The job for Dalembert to execute") do |j|
+    options[:job] = j
+  end
+
+  opts.on("-p", "--profile PROFILE", "LLM Profile to use") do |p|
+    options[:profile] = p
+  end
+
+  opts.on("-m", "--max-turns TURNS", Integer, "Maximum reasoning turns") do |m|
+    options[:max_turns] = m
+  end
+
+  opts.on("-h", "--help", "Prints this help") do
+    puts opts
+    Kernel.exit
+  end
+end.parse!
+
+puts "Starting Dalembert Agent..."
+logger = Logger.new($stdout)
+logger.level = Logger::INFO
+
+# Initialize the Agent
+agent = Dalembert::Agent.new(
+  name: :dalembert_cli,
+  profile_name: options[:profile],
+  max_turns: options[:max_turns],
+  logger: logger
+)
+
+# Set up a blank Descartes Context
+context = Descartes::Context.new
+
+puts "Executing Job: #{options[:job]}"
+result = agent.execute(context, options[:job])
+
+puts "\n"
+puts "=" * 50
+puts "FINAL RESULT:"
+puts "=" * 50
+puts result
