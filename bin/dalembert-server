@@ -1,0 +1,37 @@
+#!/usr/bin/env ruby
+# frozen_string_literal: true
+
+$LOAD_PATH.unshift(File.expand_path("../lib", __dir__))
+
+require "dalembert"
+require "descartes"
+require "descartes/hub"
+require "puma"
+require "puma/configuration"
+require "puma/launcher"
+require "optparse"
+
+port = ENV["PORT"] ? ENV["PORT"].to_i : 8089
+host = ENV["HOST"] || "0.0.0.0"
+
+OptionParser.new do |opts|
+  opts.banner = "Usage: dalembert-server [options]"
+  opts.on("-p", "--port PORT", Integer, "Port to listen on (default: #{port})") { |v| port = v }
+  opts.on("-h", "--host HOST", String, "Host to bind to (default: #{host})") { |v| host = v }
+end.parse!
+
+# Reindex all tools so Dalembert intelligence tools are discovered
+Descartes::ToolRegistry.reindex!
+
+app = Descartes::Hub::Server.new
+puts "[Dalembert::Server] Starting server on http://#{host}:#{port} and ws://#{host}:#{port}"
+
+conf = Puma::Configuration.new do |user_config|
+  user_config.bind "tcp://#{host}:#{port}"
+  user_config.app app
+  user_config.threads 1, 16
+  user_config.environment ENV["RACK_ENV"] || "production"
+end
+
+launcher = Puma::Launcher.new(conf)
+launcher.run

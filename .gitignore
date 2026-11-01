@@ -14,3 +14,6 @@
 vendor/bundle
 Gemfile.lock
 .env*
+llm.yml
+llm.local.yml
+
