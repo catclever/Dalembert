@@ -6,7 +6,7 @@ source "https://rubygems.org"
 gem "descartes", github: "catclever/Descartes"
 gem "descartes-produit", github: "catclever/descartes-produit"
 gem "llm_json", github: "catclever/llm_json"
-gem "ruby_llm"
+gem "ruby_llm", github: "catclever/ruby_llm"
 
 group :development, :test do
   gem "rspec", "~> 3.12"
