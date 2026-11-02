@@ -1,29 +1,132 @@
 # Dalembert
 
-[![Ruby](https://img.shields.io/badge/Language-Ruby-red.svg)](https://www.ruby-lang.org/)
-[![License](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE.txt)
+<p align="center">
+  <a href="README.md"><b>English</b></a> |
+  <a href="README.zh-CN.md"><b>简体中文</b></a> |
+  <a href="README.fr.md"><b>Français</b></a>
+</p>
 
-**百科全书式的编码与文档智能体。**
-*以法国《百科全书》副主编让·勒朗·达朗贝尔（Jean le Rond d'Alembert）的名字命名*
+<p align="center">
+  <a href="https://www.ruby-lang.org/"><img src="https://img.shields.io/badge/Language-Ruby-red.svg" alt="Ruby" /></a>
+  <a href="LICENSE.txt"><img src="https://img.shields.io/badge/License-MIT-blue.svg" alt="License" /></a>
+  <a href="railway.json"><img src="https://img.shields.io/badge/Deployment-Railway-0B0D0E.svg?logo=railway" alt="Railway" /></a>
+</p>
 
-基于 Descartes 生态系统构建：
-- 🧠 **[Descartes](https://github.com/catclever/Descartes)**: 核心响应式智能体 SDK 与推理引擎。
-- 🌐 **[Descartes Produit](https://github.com/catclever/descartes-produit)**: 协调云端推理与边缘执行的分布式 WebSocket 枢纽。
+**Descartes 生态系统下的百科全书式编码与文档情报大脑。**  
+*以让·勒朗·达朗贝尔（Jean le Rond d'Alembert，1717–1783，法国《百科全书》副主编、启蒙思想家与理性知识综合先驱）命名。*
 
-## 🏛️ 架构与使命
-Dalembert 旨在成为 Descartes 生态系统的云端知识、文档阅读和开源情报大脑。它强制执行一个严格的原则：*优先查阅文档并对比真实世界的代码实现；绝不盲目猜测未知的 API。*
+---
 
-## 🛠 功能与工具
-Dalembert 内置了几个专业的智能工具：
-- **GithubRepoSurvey (`github_repo_survey`)**: 通过主题/关键字搜索 GitHub，并在不克隆整个仓库的情况下安全地获取仓库蓝图（如 README 和目录结构）。
-- **GithubCodeSearch (`github_code_search`)**: 搜索代码片段在真实世界中的使用案例，跟踪开源库的实际实现方式。
-- **DocFetcher (`doc_fetcher`)**: 干净地抓取原始 Markdown 文档和 API 规范。
-- **SpecInspector (`spec_inspector`)**: 获取远程测试文件（`*_spec.rb` 或类似文件），以提取测试用例和断言作为基准事实。
-- **KnowledgeStore**: 一个内置的持久化层，用于将架构笔记、决策和调查结果记录到本地的 Markdown 知识库中。
+## 🌌 完整生态：“魂在云端，身在边缘”（Soul in Cloud, Body at Edge）
 
-## 📦 安装
+Dalembert 是 Descartes 分布式 AI 编程智能体生态中的核心知识支柱：
 
-在您的应用程序的 `Gemfile` 中添加：
+* 🧠 **[Descartes](https://github.com/catclever/Descartes)**：核心响应式 Agent SDK、反思算法与工具编排运行时（Ruby）。
+* 🌐 **[Descartes Produit](https://github.com/catclever/descartes-produit)**：分布式 WebSocket Hub 服务端，协调云端异步推理与边缘本地工具执行。
+* 📚 **[Dalembert](https://github.com/catclever/Dalembert)**：百科全书式云端情报智脑，负责权威文档检索、开源代码实态调研、测试规约比对与 GitHub 知识持久化。
+* ⚡ **[EnginEdge](https://github.com/catclever/EnginEdge)**：用 Rust 编写的高性能原生边缘执行体——提供本地 MCP stdio 服务、Tree-sitter AST 解析引擎、沙箱隔离以及实时云端 WebSocket 桥接。
+
+**Dalembert**（云端智脑）与 **EnginEdge**（边缘执行体）配合，实现了认知推理与本地环境读写执行的彻底解耦，在保障开发环境安全的前提下带来极速、低延迟的智能编程体验。
+
+---
+
+## 🏛️ 架构与核心准则
+
+Dalembert 严格恪守核心准则：**优先查阅权威文档并比对真实世界开源实现；绝不盲目猜测未知的 API。**
+
+大语言模型常在复杂架构中凭空幻觉私有方法、过时参数或不存在的配置项。Dalembert 通过主动检索公共开源仓库、提取核心测试断言，将一切设计决策锚定在“已被代码检验的事实”之上。
+
+```
+                           +-------------------------------------+
+                           |         Railway / 云端服务器         |
+                           |                                     |
+                           |       +--------------------+        |
+                           |       |   Dalembert 智脑   |        |
+                           |       |  (百科知识与推理)  |        |
+                           |       +---------+----------+        |
+                           |                 |                   |
+                           |       +---------v----------+        |
+                           |       |  Descartes-Produit |        |
+                           |       |  (WebSocket Hub)   |        |
+                           +-----------------+-------------------+
+                                             ^
+                                             | WSS 安全长连接
+                                             v
+                           +-----------------+-------------------+
+                           |            EnginEdge                |
+                           |      (Rust 原生边缘执行体)          |
+                           |                                     |
+                           |  - Tree-sitter AST 与代码结构提取   |
+                           |  - 沙箱隔离文件读写与命令执行       |
+                           |  - Model Context Protocol (MCP)     |
+                           +-------------------------------------+
+```
+
+---
+
+## 🛠 特性与专属情报工具
+
+Dalembert 内置了面向深度代码调研的一组专业工具：
+
+1. **`github_repo_survey`**：按主题或关键词搜索 GitHub 仓库，无需执行冗重的全量克隆即可安全拉取仓库蓝图（README、目录拓扑和架构配置文件）。
+2. **`github_code_search`**：在生产级开源代码库中检索类、方法与调用范式的真实使用案例。
+3. **`doc_fetcher`**：从官方文档站点纯净抽取原始 Markdown 文档与 API 规范。
+4. **`spec_inspector`**：远程检视测试文件（如 `*_spec.rb`、测试套件），提取测试断言和边界条件作为权威真相。
+5. **`knowledge_store`**：双模持久化存储层。可将架构决策与调研笔记保存到本地 Markdown Vault，或通过 GitHub Contents API 直写远端 GitHub 知识仓库。
+
+---
+
+## 🚀 云端部署与配置
+
+### Railway 一键容器部署
+
+Dalembert 提供了生产级容器化配置：
+* [`Dockerfile`](Dockerfile)：基于 `ruby:3.3-slim` 构建。
+* [`railway.json`](railway.json)：强制锁定构建器为 `DOCKERFILE`，防止回退。
+* [`bin/dalembert-server`](bin/dalembert-server)：基于 Puma 的 HTTP 与 WebSocket 服务入口，监听 `8089` 端口。
+
+#### 12-Factor 纯环境变量直驱（Zero-Config）
+
+完全解耦代码与配置文件，支持在 Railway 控制台通过环境变量一键切换模型服务商：
+
+```env
+# 1. 服务端口与安全防护
+PORT=8089
+HOST=0.0.0.0
+HUB_AUTH_TOKEN=your_secret_access_token   # 可选：保护 WebSocket 连接的握手鉴权令牌
+
+# 2. 大模型直驱配置（零配置文件）
+LLM_BASE_URL=https://api.deepseek.com/v1 # 或 http://workbuddy2api.railway.internal:48787/v1
+LLM_MODEL=deepseek-chat
+LLM_API_KEY=sk-xxxx
+
+# 3. 知识库持久化（GitHub Contents API）
+GITHUB_TOKEN=github_pat_xxxx
+KNOWLEDGE_REPO=catclever/dalembert-knowledge
+KNOWLEDGE_BRANCH=main
+```
+
+---
+
+## ⚡ 配合 EnginEdge (Rust 客户端) 联动
+
+通过本地安装的 [EnginEdge](https://github.com/catclever/EnginEdge) 随时直连云端 Dalembert：
+
+```bash
+# 触发一次云端推理 + 本地执行的即时任务
+DESCARTES_WS_URL="wss://dalembert-production.up.railway.app" \
+HUB_AUTH_TOKEN="your_secret_access_token" \
+enginedge run "调研 catclever/Descartes 的架构并输出演进报告"
+
+# 或将 EnginEdge 作为本地 MCP Server 接入 Cursor / Claude Desktop
+enginedge mcp
+```
+
+---
+
+## 📦 安装与本地命令行使用
+
+在应用的 `Gemfile` 中添加：
 
 ```ruby
 gem "descartes", github: "catclever/Descartes"
@@ -31,27 +134,16 @@ gem "descartes-produit", github: "catclever/descartes-produit"
 gem "dalembert", github: "catclever/Dalembert"
 ```
 
-然后执行：
-```bash
-$ bundle install
-```
-
-## 🚀 使用方法
-
-### 独立 CLI
-
-Dalembert 可以直接从命令行调用：
+通过独立 CLI 执行单次调研：
 
 ```bash
 $ bundle exec bin/dalembert -j "Analyze the catclever/Descartes architecture" -m 10
 ```
 
-### 接入 Descartes-Produit
-
-您可以引入 `Dalembert::Agent` 并将其配置到您的 `Descartes::Body` 执行花名册中。
+或接入 `Descartes::Body` 状态机执行集群：
 
 ```ruby
-require 'dalembert'
+require "dalembert"
 
 Descartes::Body.define(:research_cluster) do
   roster do
@@ -60,5 +152,8 @@ Descartes::Body.define(:research_cluster) do
 end
 ```
 
+---
+
 ## 📝 许可证
-MIT License。
+
+采用 [MIT 许可证](LICENSE.txt)。
