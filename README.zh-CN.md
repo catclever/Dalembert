@@ -1,9 +1,9 @@
 # Dalembert
 
 <p align="center">
-  <a href="README.md"><b>English</b></a> |
-  <a href="README.zh-CN.md"><b>简体中文</b></a> |
-  <a href="README.fr.md"><b>Français</b></a>
+  <a href="README.md"><b>Français</b></a> |
+  <a href="README.en.md"><b>English</b></a> |
+  <a href="README.zh-CN.md"><b>简体中文</b></a>
 </p>
 
 <p align="center">
@@ -24,10 +24,10 @@
 
 ---
 
-## 🌌 完整生态：“魂在云端，身在边缘”（Soul in Cloud, Body at Edge）
+## 🌌 完整组件：“灵肉分离模式”（Soul in Cloud, Body at Edge）
 
 在真实的软件工程研发中，Dalembert 作为云端知识与情报智脑，与本地边缘执行体 **[EnginEdge](https://github.com/catclever/EnginEdge)** 紧密协同：
-* **云端智脑 (Dalembert)**：负责理解复杂研发意图、主动调研开源代码与查阅权威规范，依托底层 **[Descartes](https://github.com/catclever/Descartes)** 核心算法进行深度推理与架构决策。
+* **云端智脑 (Dalembert)**：负责理解复杂研发意图、主动调研开源代码与查阅权威规范，依托底层 **[Descartes](https://github.com/catclever/Descartes)** 进行深度推理与架构决策。
 * **边缘执行体 (EnginEdge)**：扎根开发者本地机器或受控容器，通过 MCP 协议与 AST 引擎安全执行文件读写、语法分析与命令操作。
 
 两者实现了认知推理与本地环境读写执行的彻底解耦，在保障开发环境安全的前提下带来极速、低延迟的智能编程体验。
