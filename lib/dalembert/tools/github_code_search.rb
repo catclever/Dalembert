@@ -46,6 +46,7 @@ module Dalembert
         req = Net::HTTP::Get.new(url)
         req["Accept"] = "application/vnd.github.v3+json"
         req["User-Agent"] = "Dalembert-Agent"
+        req["Authorization"] = "Bearer #{ENV['GITHUB_TOKEN']}" if ENV["GITHUB_TOKEN"] && !ENV["GITHUB_TOKEN"].empty?
 
         res = Net::HTTP.start(url.hostname, url.port, use_ssl: true) do |http|
           http.request(req)

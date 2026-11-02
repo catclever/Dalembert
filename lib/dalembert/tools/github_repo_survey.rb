@@ -44,6 +44,7 @@ module Dalembert
         req = Net::HTTP::Get.new(url)
         req["Accept"] = "application/vnd.github.v3+json"
         req["User-Agent"] = "Dalembert-Agent"
+        req["Authorization"] = "Bearer #{ENV['GITHUB_TOKEN']}" if ENV["GITHUB_TOKEN"] && !ENV["GITHUB_TOKEN"].empty?
 
         res = Net::HTTP.start(url.hostname, url.port, use_ssl: true) do |http|
           http.request(req)
@@ -79,6 +80,7 @@ module Dalembert
         req = Net::HTTP::Get.new(url)
         req["Accept"] = "application/vnd.github.v3.raw"
         req["User-Agent"] = "Dalembert-Agent"
+        req["Authorization"] = "Bearer #{ENV['GITHUB_TOKEN']}" if ENV["GITHUB_TOKEN"] && !ENV["GITHUB_TOKEN"].empty?
 
         res = Net::HTTP.start(url.hostname, url.port, use_ssl: true) do |http|
           http.request(req)
@@ -96,6 +98,7 @@ module Dalembert
         req = Net::HTTP::Get.new(url)
         req["Accept"] = "application/vnd.github.v3+json"
         req["User-Agent"] = "Dalembert-Agent"
+        req["Authorization"] = "Bearer #{ENV['GITHUB_TOKEN']}" if ENV["GITHUB_TOKEN"] && !ENV["GITHUB_TOKEN"].empty?
 
         # Adding authorization for better rate limits if needed in real use, but for now we assume public APIs
 
