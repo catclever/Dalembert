@@ -8,7 +8,7 @@ GIT
 
 GIT
   remote: https://github.com/catclever/descartes-produit.git
-  revision: 98b1a89fcc60b647dd3734fc971bbff3c41e117f
+  revision: c29cdce99bcd5b2ed9879575e7c330fde2d9eba2
   specs:
     descartes-produit (0.2.0)
       descartes
