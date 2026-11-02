@@ -15,16 +15,20 @@
 **Le Cerveau Encyclopédique d'Intelligence et de Documentation pour l'Écosystème Descartes.**  
 *Nommé en hommage à Jean le Rond d'Alembert (1717–1783), coéditeur de l'Encyclopédie et pionnier des Lumières dans la synthèse rationnelle des savoirs.*
 
+Construit sur l'écosystème Descartes :
+- 🧠 **[Descartes](https://github.com/catclever/Descartes)** : Le SDK d'agent réactif fondamental et moteur de raisonnement ;
+- 🌐 **[Descartes Produit](https://github.com/catclever/descartes-produit)** : Le Hub WebSocket distribué coordonnant le raisonnement dans le Cloud et l'exécution en périphérie ;
+
+Conçu pour s'associer à :
+- ⚡ **[EnginEdge](https://github.com/catclever/EnginEdge)** : L'exécuteur natif ultra-rapide écrit en Rust — serveur local MCP stdio, moteur syntaxique AST Tree-sitter, bac à sable sécurisé et pont WebSocket direct vers le Cloud.
+
 ---
 
 ## 🌌 L'Écosystème : L'Esprit dans le Cloud, le Corps à la Périphérie
 
-Dalembert constitue le pilier cognitif et documentaire de l'architecture distribuée d'agents IA Descartes :
-
-* 🧠 **[Descartes](https://github.com/catclever/Descartes)** : Le SDK d'agent réactif fondamental, les algorithmes de réflexion et le runtime de routage d'outils (Ruby).
-* 🌐 **[Descartes Produit](https://github.com/catclever/descartes-produit)** : Le Hub WebSocket distribué coordonnant le raisonnement asynchrone dans le Cloud et l'exécution d'outils en périphérie (*Edge*).
-* 📚 **[Dalembert](https://github.com/catclever/Dalembert)** : Le cerveau encyclopédique chargé de l'exploration de dépôts open source, de l'extraction documentaire, de la vérification des spécifications et de la persistance des connaissances via GitHub.
-* ⚡ **[EnginEdge](https://github.com/catclever/EnginEdge)** : L'exécuteur natif ultra-rapide écrit en Rust — serveur local MCP stdio, moteur syntaxique AST Tree-sitter, bac à sable sécurisé (*sandbox*) et pont WebSocket direct vers le Cloud.
+Dans le cadre du développement logiciel distribué, Dalembert agit comme le cerveau cognitif et documentaire en étroite synergie avec **[EnginEdge](https://github.com/catclever/EnginEdge)** :
+* **L'Esprit dans le Cloud (Dalembert)** : Comprendre les intentions de haut niveau, explorer le code open source, consulter les spécifications officielles et conduire le raisonnement analytique propulsé par **[Descartes](https://github.com/catclever/Descartes)**.
+* **Le Corps à la Périphérie (EnginEdge)** : Intégré aux machines de développement ou conteneurs locaux pour manipuler les fichiers, parser les arbres AST et exécuter les commandes en toute sécurité via le protocole MCP.
 
 Grâce à la synergie entre **Dalembert** (l'Esprit dans le Cloud) et **EnginEdge** (le Corps à la Périphérie), le raisonnement cognitif est totalement découplé des manipulations de fichiers locales, garantissant sécurité, légèreté et réactivité maximale.
 

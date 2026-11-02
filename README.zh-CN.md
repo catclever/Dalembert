@@ -15,18 +15,22 @@
 **Descartes 生态系统下的百科全书式编码与文档情报大脑。**  
 *以让·勒朗·达朗贝尔（Jean le Rond d'Alembert，1717–1783，法国《百科全书》副主编、启蒙思想家与理性知识综合先驱）命名。*
 
+基于 Descartes 生态系统构建：
+- 🧠 **[Descartes](https://github.com/catclever/Descartes)**：响应式智能体 SDK 与推理核心；
+- 🌐 **[Descartes Produit](https://github.com/catclever/descartes-produit)**：协调云端与边缘的分布式 WebSocket 枢纽；
+
+配合使用的原生边缘执行体：
+- ⚡ **[EnginEdge](https://github.com/catclever/EnginEdge)**：用 Rust 编写的高性能原生边缘执行体——提供本地 MCP stdio 服务、Tree-sitter AST 解析引擎、沙箱隔离以及实时云端 WebSocket 桥接。
+
 ---
 
 ## 🌌 完整生态：“魂在云端，身在边缘”（Soul in Cloud, Body at Edge）
 
-Dalembert 是 Descartes 分布式 AI 编程智能体生态中的核心知识支柱：
+在真实的软件工程研发中，Dalembert 作为云端知识与情报智脑，与本地边缘执行体 **[EnginEdge](https://github.com/catclever/EnginEdge)** 紧密协同：
+* **云端智脑 (Dalembert)**：负责理解复杂研发意图、主动调研开源代码与查阅权威规范，依托底层 **[Descartes](https://github.com/catclever/Descartes)** 核心算法进行深度推理与架构决策。
+* **边缘执行体 (EnginEdge)**：扎根开发者本地机器或受控容器，通过 MCP 协议与 AST 引擎安全执行文件读写、语法分析与命令操作。
 
-* 🧠 **[Descartes](https://github.com/catclever/Descartes)**：核心响应式 Agent SDK、反思算法与工具编排运行时（Ruby）。
-* 🌐 **[Descartes Produit](https://github.com/catclever/descartes-produit)**：分布式 WebSocket Hub 服务端，协调云端异步推理与边缘本地工具执行。
-* 📚 **[Dalembert](https://github.com/catclever/Dalembert)**：百科全书式云端情报智脑，负责权威文档检索、开源代码实态调研、测试规约比对与 GitHub 知识持久化。
-* ⚡ **[EnginEdge](https://github.com/catclever/EnginEdge)**：用 Rust 编写的高性能原生边缘执行体——提供本地 MCP stdio 服务、Tree-sitter AST 解析引擎、沙箱隔离以及实时云端 WebSocket 桥接。
-
-**Dalembert**（云端智脑）与 **EnginEdge**（边缘执行体）配合，实现了认知推理与本地环境读写执行的彻底解耦，在保障开发环境安全的前提下带来极速、低延迟的智能编程体验。
+两者实现了认知推理与本地环境读写执行的彻底解耦，在保障开发环境安全的前提下带来极速、低延迟的智能编程体验。
 
 ---
 

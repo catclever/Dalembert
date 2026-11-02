@@ -15,16 +15,20 @@
 **The Encyclopedic Coding & Documentation Intelligence Brain for the Descartes Ecosystem.**  
 *Named in honour of Jean le Rond d'Alembert (1717–1783), co-editor of the French Encyclopédie and champion of rational, evidence-based knowledge.*
 
+Built on top of the Descartes ecosystem:
+- 🧠 **[Descartes](https://github.com/catclever/Descartes)**: The core reactive Agent SDK and reasoning engine.
+- 🌐 **[Descartes Produit](https://github.com/catclever/descartes-produit)**: The distributed WebSocket Hub coordinating cloud reasoning and edge execution.
+
+Designed to be paired with:
+- ⚡ **[EnginEdge](https://github.com/catclever/EnginEdge)**: The ultra-fast native edge executor written in Rust — local MCP stdio server, Tree-sitter AST engine, security chroot jail, and real-time cloud WebSocket bridge.
+
 ---
 
 ## 🌌 The Ecosystem: Soul in Cloud, Body at Edge
 
-Dalembert is an essential pillar of the distributed Descartes AI coding agent architecture:
-
-* 🧠 **[Descartes](https://github.com/catclever/Descartes)**: The core reactive Agent SDK, reflection algorithms, and tool orchestration runtime (Ruby).
-* 🌐 **[Descartes Produit](https://github.com/catclever/descartes-produit)**: The distributed WebSocket Hub coordinating cloud-based reasoning with local edge tool execution.
-* 📚 **[Dalembert](https://github.com/catclever/Dalembert)**: The encyclopedic intelligence brain providing ground-truth documentation, open-source code surveys, spec verification, and GitHub-backed knowledge persistence.
-* ⚡ **[EnginEdge](https://github.com/catclever/EnginEdge)**: The ultra-fast native edge executor written in Rust — local MCP stdio server, Tree-sitter AST engine, security chroot jail, and real-time cloud WebSocket bridge.
+Dalembert is the encyclopedic intelligence brain of the distributed Descartes AI coding agent architecture, working hand in hand with **[EnginEdge](https://github.com/catclever/EnginEdge)**:
+* **Cloud Intelligence (Dalembert)**: Understanding architectural intent, researching open-source implementations, consulting authoritative documentation, and performing cognitive reasoning powered by **[Descartes](https://github.com/catclever/Descartes)**.
+* **Edge Execution (EnginEdge)**: Operating directly inside developer workspaces or controlled containers, executing file operations, AST parsing, and shell tasks safely via MCP.
 
 Together, **Dalembert** (cloud intelligence) and **EnginEdge** (edge execution) separate cognitive reasoning from filesystem manipulation, enabling seamless, secure, and low-latency agent workflows across cloud and workstation environments.
 
