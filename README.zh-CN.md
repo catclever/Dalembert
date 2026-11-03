@@ -98,6 +98,7 @@ Dalembert 提供了生产级容器化配置：
 PORT=8089
 HOST=0.0.0.0
 HUB_AUTH_TOKEN=your_secret_access_token   # 可选：保护 WebSocket 连接的握手鉴权令牌
+MAX_TURNS=50                              # 可选：云端推理最大轮数上限（默认 30 轮）
 
 # 2. 大模型直驱配置（零配置文件）
 LLM_BASE_URL=https://api.deepseek.com/v1 # 或 http://workbuddy2api.railway.internal:48787/v1

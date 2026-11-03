@@ -98,6 +98,7 @@ Dalembert prend en charge la configuration native par variables d'environnement,
 PORT=8089
 HOST=0.0.0.0
 HUB_AUTH_TOKEN=votre_jeton_secret          # Optionnel : protège la connexion WebSocket
+MAX_TURNS=50                               # Optionnel : quota de tours de raisonnement (défaut : 30)
 
 # 2. Pilotage Direct du LLM (Zéro-Config)
 LLM_BASE_URL=https://api.deepseek.com/v1   # ou http://workbuddy2api.railway.internal:48787/v1

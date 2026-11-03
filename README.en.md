@@ -98,6 +98,7 @@ Dalembert supports cloud-native direct environment drive without requiring stati
 PORT=8089
 HOST=0.0.0.0
 HUB_AUTH_TOKEN=your_secret_access_token   # Optional: Protects WebSocket handshake
+MAX_TURNS=50                              # Optional: Max reasoning turns per task (default: 30)
 
 # 2. LLM Direct Drive (Zero-Config)
 LLM_BASE_URL=https://api.deepseek.com/v1 # or http://workbuddy2api.railway.internal:48787/v1
