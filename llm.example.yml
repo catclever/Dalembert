@@ -1,5 +1,15 @@
 # llm.example.yml - Example model profile configuration for Dalembert
 # Copy to llm.yml or pass API keys via environment variables
+#
+# Multi-Provider & Model Decoupling Usage (方案 B):
+# 1. CLI Usage:
+#    - Specify Provider: bin/dalembert -p deepseek -j "..."
+#    - Composite syntax: bin/dalembert -p deepseek/deepseek-reasoner -j "..."
+#    - Explicit model:   bin/dalembert -p deepseek -m deepseek-reasoner -j "..."
+#
+# 2. WebSocket / EnginEdge Usage:
+#    - enginedge run --profile deepseek/deepseek-reasoner "..."
+#    - Or in JSON payload: { "llm_profile": "deepseek", "model": "deepseek-reasoner" }
 
 default:
   format: "openai"

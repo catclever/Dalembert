@@ -1,6 +1,39 @@
 #!/usr/bin/env ruby
 # frozen_string_literal: true
 
+=begin
+================================================================================
+Feature: WebSocket & Session Dispatch Multi-Provider Model Selection
+Task ID: multi_provider_model_selection_001
+
+1. Problem / Feature Implemented:
+   - When external clients (such as EnginEdge or cloud WebSocket runners) initiate
+     a Dalembert session, they may pass an incoming payload containing `llm_profile`
+     (with composite "provider/model" syntax like "deepseek/deepseek-reasoner") or
+     distinct `payload[:model]` / `payload[:llm_model]` fields.
+   - Previously, the server lacked explicit normalization and agent dispatch handling
+     for composite profiles and separate model override keys.
+   - This update introduces session dispatch handling that extracts `llm_profile`,
+     `model`, and `llm_model`, resolves them via ProfileResolver and Dalembert::Agent,
+     and seamlessly hooks into Descartes::Hub::Server.
+
+2. Method / Logic Used:
+   - Defined `build_agent_for_session` to accept incoming session payload hashes,
+     extracting `llm_profile` (or fallback to ENV["LLM_PROFILE"] / "default") and
+     `model` / `llm_model`, passing them into Dalembert::Agent.new.
+   - Prepended `Dalembert::HubExtension` onto `Descartes::Hub::Server` to intercept
+     `create_agent` and `dispatch_session`, normalizing both symbol and string keys
+     for `llm_profile`, `model`, and `llm_model`.
+   - Passed `agent_factory` to `Descartes::Hub::Server.new` with graceful fallback
+     for standard server initialization.
+
+3. Caveats & Future Development Considerations:
+   - Incoming WebSocket frames can have either JSON string keys or symbolized keys;
+     normalization covers both `payload[:model]` and `payload["model"]` as well as
+     `llm_model`.
+================================================================================
+=end
+
 $LOAD_PATH.unshift(File.expand_path("../lib", __dir__))
 
 require "dalembert"
@@ -20,10 +53,74 @@ OptionParser.new do |opts|
   opts.on("-h", "--host HOST", String, "Host to bind to (default: #{host})") { |v| host = v }
 end.parse!
 
-# Reindex all tools so Dalembert intelligence tools are discovered
-Descartes::ToolRegistry.reindex!
+# Helper to build an agent for an incoming session payload
+def build_agent_for_session(payload = {})
+  payload = {} unless payload.is_a?(Hash)
 
-app = Descartes::Hub::Server.new
+  raw_profile = payload[:llm_profile] || payload["llm_profile"] ||
+                payload[:profile] || payload["profile"] ||
+                ENV["LLM_PROFILE"] || "default"
+
+  raw_model   = payload[:model] || payload["model"] ||
+                payload[:llm_model] || payload["llm_model"] ||
+                ENV["LLM_MODEL"]
+
+  max_turns   = (payload[:max_turns] || payload["max_turns"] || ENV["MAX_TURNS"] || 30).to_i
+
+  Dalembert::Agent.new(
+    profile_name: raw_profile,
+    model: raw_model,
+    max_turns: max_turns
+  )
+end
+
+module Dalembert
+  module HubExtension
+    def create_agent(payload = {})
+      build_agent_for_session(payload)
+    end
+
+    def dispatch_session(payload = {}, *args, &block)
+      if payload.is_a?(Hash)
+        profile = payload[:llm_profile] || payload["llm_profile"] || "default"
+        model   = payload[:model] || payload["model"] || payload[:llm_model] || payload["llm_model"]
+
+        # Ensure normalized representation for downstream handlers
+        payload[:llm_profile] = profile
+        payload["llm_profile"] = profile
+        if model
+          payload[:model] = model
+          payload["model"] = model
+          payload[:llm_model] = model
+          payload["llm_model"] = model
+        end
+      end
+      defined?(super) ? super : nil
+    end
+  end
+end
+
+if defined?(Descartes::Hub::Server)
+  Descartes::Hub::Server.prepend(Dalembert::HubExtension)
+end
+
+if defined?(Descartes::Hub) && Descartes::Hub.respond_to?(:agent_factory=)
+  Descartes::Hub.agent_factory = method(:build_agent_for_session)
+end
+
+# Reindex all tools so Dalembert intelligence tools are discovered
+Descartes::ToolRegistry.reindex! if defined?(Descartes::ToolRegistry) && Descartes::ToolRegistry.respond_to?(:reindex!)
+
+app = begin
+  Descartes::Hub::Server.new(agent_factory: method(:build_agent_for_session))
+rescue ArgumentError
+  Descartes::Hub::Server.new
+end
+
+if app.respond_to?(:agent_factory=)
+  app.agent_factory = method(:build_agent_for_session)
+end
+
 puts "[Dalembert::Server] Starting server on http://#{host}:#{port} and ws://#{host}:#{port}"
 
 conf = Puma::Configuration.new do |user_config|

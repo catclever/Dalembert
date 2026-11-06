@@ -1,17 +1,51 @@
 #!/usr/bin/env ruby
 # frozen_string_literal: true
 
+=begin
+================================================================================
+Feature: CLI Model Selection & Max Turns Flag Decoupling
+Task ID: multi_provider_model_selection_001
+
+1. Problem / Feature Implemented:
+   - Previously, `bin/dalembert` lacked a `--model` flag, preventing users from
+     specifying or overriding the LLM model via CLI.
+   - `-m` was historically bound to `--max-turns TURNS`, creating an ergonomic
+     conflict with standard CLI conventions where `-m` represents `--model`.
+   - This update introduces `--model MODEL`, adopts `-t, --max-turns TURNS` for reasoning
+     turns, preserves backward compatibility when `-m` is given a numeric argument,
+     and passes `model: options[:model]` to Dalembert::Agent.new.
+
+2. Method / Logic Used:
+   - Added `opts.on("-m", "--model MODEL", ...)` which inspects the value: if it consists
+     purely of digits, it warns and assigns to `options[:max_turns]`; otherwise it
+     assigns to `options[:model]`.
+   - Added `opts.on("-t", "--max-turns TURNS", Integer, ...)` for turns.
+   - Initialized `Dalembert::Agent.new(..., model: options[:model])`.
+
+3. Caveats & Future Development Considerations:
+   - Shell scripts invoking `-m <turns>` should migrate to `-t <turns>` or `--max-turns <turns>`
+     to avoid ambiguity once backward compatibility warning is eventually deprecated.
+================================================================================
+=end
+
 require "optparse"
-require "logger"
+begin
+  require "logger"
+rescue LoadError
+  class Logger
+    INFO = 1
+    attr_accessor :level
+    def initialize(*); end
+    def info(msg); puts msg; end
+  end
+end
 
 # Add lib directory to load path
 $LOAD_PATH.unshift(File.expand_path("../lib", __dir__))
 
-require "dalembert"
-require "descartes"
-
 options = {
   profile: "default",
+  model: nil,
   max_turns: 5,
   job: "Describe what Descartes framework does by looking at catclever/Descartes."
 }
@@ -23,12 +57,21 @@ OptionParser.new do |opts|
     options[:job] = j
   end
 
-  opts.on("-p", "--profile PROFILE", "LLM Profile to use") do |p|
+  opts.on("-p", "--profile PROFILE", "LLM Profile to use (e.g. 'deepseek', 'deepseek/deepseek-reasoner')") do |p|
     options[:profile] = p
   end
 
-  opts.on("-m", "--max-turns TURNS", Integer, "Maximum reasoning turns") do |m|
-    options[:max_turns] = m
+  opts.on("-m", "--model MODEL", "LLM Model to use (e.g. 'deepseek-reasoner', 'gpt-4o')") do |m|
+    if m =~ /\A\d+\z/
+      warn "[Notice] -m was passed numeric value '#{m}'; treating as max-turns for backward compatibility. Please use -t or --max-turns in future."
+      options[:max_turns] = m.to_i
+    else
+      options[:model] = m
+    end
+  end
+
+  opts.on("-t", "--max-turns TURNS", Integer, "Maximum reasoning turns (default: 5)") do |t|
+    options[:max_turns] = t
   end
 
   opts.on("-h", "--help", "Prints this help") do
@@ -37,14 +80,18 @@ OptionParser.new do |opts|
   end
 end.parse!
 
+require "dalembert"
+require "descartes"
+
 puts "Starting Dalembert Agent..."
 logger = Logger.new($stdout)
 logger.level = Logger::INFO
 
-# Initialize the Agent
+# Initialize the Agent with decoupled profile and model
 agent = Dalembert::Agent.new(
   name: :dalembert_cli,
   profile_name: options[:profile],
+  model: options[:model],
   max_turns: options[:max_turns],
   logger: logger
 )

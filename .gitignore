@@ -15,4 +15,6 @@ vendor/bundle
 .env*
 llm.yml
 llm.local.yml
+.vscode/
+.ruby-lsp/
 
