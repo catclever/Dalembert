@@ -548,5 +548,40 @@ RSpec.describe Dalembert::Workflows::SweBenchWorkflow do
       expect(context.get(:reproduction_report)).to eq("Error: Sandbox container disconnected")
       expect(context.get(:patch_report)).to be_nil
     end
+
+    it "unwraps send_message confirmation strings to preserve real stage reports across stages" do
+      stage_prompts = {}
+
+      allow(Dalembert::Agent).to receive(:new).and_wrap_original { |orig, **kwargs|
+        agent = orig.call(**kwargs)
+        stage_name = kwargs[:name]
+
+        allow(agent).to receive(:execute) do |ctx, stage_prompt|
+          stage_prompts[stage_name] = stage_prompt
+          case stage_name
+          when :swe_bench_locate
+            ctx.set(:localization_report, "Real Stage 1 localization report")
+            "Successfully saved output to context key 'localization_report'"
+          when :swe_bench_reproduce
+            ctx.set(:reproduction_report, "Real Stage 2 reproduction report")
+            "Successfully saved output to context key 'reproduction_report'"
+          when :swe_bench_patch_and_verify
+            ctx.set(:patch_report, "Real Stage 3 patch report")
+            "Successfully saved output to context key 'patch_report'"
+          end
+        end
+
+        agent
+      }
+
+      res = workflow.execute(context, "Fix validator trailing newline")
+      expect(res).to eq("Real Stage 3 patch report")
+      expect(context.get(:localization_report)).to eq("Real Stage 1 localization report")
+      expect(context.get(:reproduction_report)).to eq("Real Stage 2 reproduction report")
+      expect(context.get(:patch_report)).to eq("Real Stage 3 patch report")
+      expect(stage_prompts[:swe_bench_reproduce]).to include("Real Stage 1 localization report")
+      expect(stage_prompts[:swe_bench_reproduce]).not_to include("Successfully saved output to context key")
+      expect(stage_prompts[:swe_bench_patch_and_verify]).to include("Real Stage 2 reproduction report")
+    end
   end
 end

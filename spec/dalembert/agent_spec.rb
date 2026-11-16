@@ -197,14 +197,17 @@ RSpec.describe Dalembert::Agent do
       end
     end
 
-    it "masks all cloud tools when cloud_tools: [] is passed while keeping external tools" do
+    it "masks all cloud tools when cloud_tools: [] is passed while keeping external and survival tools" do
       agent = described_class.new(
         tools: [mock_read_tool],
         cloud_tools: []
       )
 
       expect(agent.enabled_tools).to eq([mock_read_tool])
-      expect(agent.instance_variable_get(:@tools)).to eq([mock_read_tool])
+      runtime_tools = agent.instance_variable_get(:@tools)
+      expect(runtime_tools).to include(mock_read_tool)
+      expect(runtime_tools.map(&:tool_name)).to include("send_message")
+      expect(runtime_tools).not_to include(*Dalembert::Agent::ALL_CLOUD_TOOLS)
     end
 
     it "filters out external and cloud tools matching disabled_tools" do

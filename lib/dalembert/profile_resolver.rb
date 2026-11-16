@@ -110,24 +110,30 @@ module Dalembert
         env_api_key  = ENV["LLM_API_KEY"] && !ENV["LLM_API_KEY"].strip.empty? ? ENV["LLM_API_KEY"].strip : nil
 
         cfg_base_url = resolve_env_value(provider_section["base_url"] || provider_section[:base_url])
+        explicit_provider_base_url = resolve_env_value(ENV["#{provider.upcase}_BASE_URL"])
+        unknown_explicit_fallback = is_explicit && provider_section.empty? &&
+                                    (explicit_provider_base_url.nil? || explicit_provider_base_url.to_s.strip.empty?)
+
         base_url = if is_explicit
-                     # Explicit profile: prevent ENV["LLM_BASE_URL"] from hijacking channel
-                     cfg_base_url || resolve_env_value(ENV["#{provider.upcase}_BASE_URL"])
+                     # Explicit profile in llm.yml or <PROVIDER>_BASE_URL ignores ENV["LLM_BASE_URL"];
+                     # unknown explicit profiles fall back cleanly to 12-factor ENV["LLM_BASE_URL"].
+                     cfg_base_url || explicit_provider_base_url || (unknown_explicit_fallback ? env_base_url : nil)
                    else
                      # Zero-config 12-factor fallback: ENV["LLM_BASE_URL"] takes precedence
                      env_base_url || cfg_base_url
                    end
 
         cfg_api_key = resolve_env_value(provider_section["api_key"] || provider_section[:api_key])
-        api_key = if !is_explicit && env_base_url
+        explicit_provider_api_key = resolve_env_value(ENV["#{provider.upcase}_API_KEY"])
+        api_key = if (!is_explicit || unknown_explicit_fallback) && env_base_url
                     # Under 12-factor LLM_BASE_URL zero-config, ENV["LLM_API_KEY"] must not be shadowed by default.api_key
                     env_api_key ||
                       cfg_api_key ||
-                      resolve_env_value(ENV["#{provider.upcase}_API_KEY"]) ||
+                      explicit_provider_api_key ||
                       ENV["DEEPSEEK_API_KEY"]
                   else
                     cfg_api_key ||
-                      resolve_env_value(ENV["#{provider.upcase}_API_KEY"]) ||
+                      explicit_provider_api_key ||
                       (!is_explicit ? env_api_key : nil) ||
                       ENV["DEEPSEEK_API_KEY"]
                   end

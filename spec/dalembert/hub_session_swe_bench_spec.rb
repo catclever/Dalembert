@@ -112,11 +112,13 @@ RSpec.describe Dalembert::HubExtension do
   describe "SWE-bench init routing, tool masking (6 -> 7 -> 11), and phase streaming" do
     it "routes mode: 'swe_bench' to SweBenchWorkflow, strips cloud/disabled tools, enforces 6->7->11 progression, and emits phase_change + finished frames" do
       stage_tools = {}
+      stage_runtime_tools = {}
       stage_budgets = {}
 
       allow(Dalembert::Agent).to receive(:new).and_wrap_original do |orig, **kwargs|
         agent = orig.call(**kwargs)
         stage_tools[kwargs[:name]] = agent.enabled_tools
+        stage_runtime_tools[kwargs[:name]] = agent.instance_variable_get(:@tools)
         stage_budgets[kwargs[:name]] = kwargs[:max_turns]
 
         allow(agent).to receive(:execute) do |_ctx, _stage_prompt|
@@ -165,6 +167,9 @@ RSpec.describe Dalembert::HubExtension do
       expect(stage_tools[:swe_bench_locate].map(&:tool_name)).to match_array(locate_names)
       expect(stage_tools[:swe_bench_reproduce].map(&:tool_name)).to match_array(reproduce_names)
       expect(stage_tools[:swe_bench_patch_and_verify].map(&:tool_name)).to match_array(patch_names)
+      %i[swe_bench_locate swe_bench_reproduce swe_bench_patch_and_verify].each do |stage_key|
+        expect(stage_runtime_tools[stage_key].map(&:tool_name)).to include("send_message")
+      end
       expect(stage_budgets[:swe_bench_locate]).to eq(14)
       expect(stage_budgets[:swe_bench_reproduce]).to eq(12)
 

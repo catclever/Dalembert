@@ -246,6 +246,18 @@ RSpec.describe Dalembert::ProfileResolver do
         expect(res_default[:base_url]).to eq("http://internal-proxy:8080/v1")
         expect(res_default[:api_key]).to eq("sk-deepseek-mock")
       end
+
+      it "falls back to LLM_BASE_URL and LLM_API_KEY for unknown explicit profiles like 'workbuddy'" do
+        ENV["LLM_API_KEY"] = "sk-railway-hy4"
+        ENV.delete("WORKBUDDY_BASE_URL")
+        ENV.delete("WORKBUDDY_API_KEY")
+
+        res_wb = described_class.resolve("workbuddy", model: "hy4", config: mock_config)
+        expect(res_wb[:profile_name]).to eq("workbuddy")
+        expect(res_wb[:base_url]).to eq("http://internal-proxy:8080/v1")
+        expect(res_wb[:api_key]).to eq("sk-railway-hy4")
+        expect(res_wb[:model]).to eq("hy4")
+      end
     end
 
     context "with environment variable resolution in YAML" do

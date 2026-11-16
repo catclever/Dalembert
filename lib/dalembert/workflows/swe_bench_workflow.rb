@@ -1,5 +1,6 @@
 # frozen_string_literal: true
 
+require "json"
 require "descartes"
 require_relative "../agent" unless defined?(Dalembert::Agent) && Dalembert::Agent.respond_to?(:resolve_cloud_tools)
 
@@ -235,12 +236,13 @@ module Dalembert
         # Stage 1: :locate (Bug Localization Funnel)
         locate_budget = [[(total_budget * 0.30).ceil, 1].max, total_budget - 2].min
         emit_stage_banner(:locate, "Phase 1/3 [:locate] — Bug Localization Funnel (Read-Only Inspection)")
-        res1, locate_used, trace1 = run_stage_with_tracking(
+        res1, locate_used, trace1, submitted1 = run_stage_with_tracking(
           :locate,
           locate_budget,
           context,
           build_locate_prompt(prompt)
         )
+        res1 = unwrap_stage_result(res1, context, submitted1)
         if max_turns_exceeded?(res1)
           res1 = synthesize_auto_handoff(:locate, locate_budget, trace1)
           emit(:thought, "\n[SWE-bench Workflow] Stage :locate reached #{locate_budget}-turn cap; advancing with auto-handoff.\n")
@@ -256,12 +258,13 @@ module Dalembert
         rem_after_1 = [total_budget - locate_used, 2].max
         reproduce_budget = [[(total_budget * 0.25).ceil, 1].max, rem_after_1 - 1].min
         emit_stage_banner(:reproduce, "Phase 2/3 [:reproduce] — Minimal Reproduction Verification (Red Light)")
-        res2, reproduce_used, trace2 = run_stage_with_tracking(
+        res2, reproduce_used, trace2, submitted2 = run_stage_with_tracking(
           :reproduce,
           reproduce_budget,
           context,
           build_reproduce_prompt(prompt, res1)
         )
+        res2 = unwrap_stage_result(res2, context, submitted2)
         if max_turns_exceeded?(res2)
           res2 = synthesize_auto_handoff(:reproduce, reproduce_budget, trace2)
           emit(:thought, "\n[SWE-bench Workflow] Stage :reproduce reached #{reproduce_budget}-turn cap; advancing with auto-handoff.\n")
@@ -276,12 +279,13 @@ module Dalembert
         # Stage 3: :patch_and_verify (Surgical Patch & Regression Gate — Green Light)
         patch_budget = [rem_after_1 - reproduce_used, 1].max
         emit_stage_banner(:patch_and_verify, "Phase 3/3 [:patch_and_verify] — Surgical Patch & Regression Gate (Green Light)")
-        res3, _patch_used, _trace3 = run_stage_with_tracking(
+        res3, _patch_used, _trace3, submitted3 = run_stage_with_tracking(
           :patch_and_verify,
           patch_budget,
           context,
           build_patch_and_verify_prompt(prompt, res1, res2)
         )
+        res3 = unwrap_stage_result(res3, context, submitted3)
         context.set(:patch_report, res3) if context.respond_to?(:set)
         res3
       end
@@ -327,6 +331,7 @@ module Dalembert
         llm_calls = 0
         tool_turns = 0
         stage_trace = []
+        last_submitted_value = nil
 
         llm = agent.respond_to?(:llm) ? agent.llm : nil
         if llm && llm.respond_to?(:call_with_system) && !llm.frozen?
@@ -361,6 +366,8 @@ module Dalembert
           end
           agent.on(:tool_call_start) do |data|
             tool_turns += 1
+            captured_val = extract_send_message_value(data)
+            last_submitted_value = captured_val unless captured_val.nil?
             record_stage_tool_start(stage_trace, data)
           end
           agent.on(:tool_call_end) do |data|
@@ -378,7 +385,46 @@ module Dalembert
                  [[tool_turns, 1].max, stage_budget].min
                end
 
-        [res, used, stage_trace]
+        [res, used, stage_trace, last_submitted_value]
+      end
+
+      def extract_send_message_value(data)
+        return nil unless data.is_a?(Hash)
+
+        tool = (data[:tool] || data["tool"] || data[:name] || data["name"]).to_s.strip
+        return nil unless tool == "send_message"
+
+        raw_args = data[:arguments] || data["arguments"] || data[:args] || data["args"]
+        parsed = case raw_args
+                 when Hash
+                   raw_args
+                 when String
+                   begin
+                     defined?(LLMJSON) ? LLMJSON.parse(raw_args) : JSON.parse(raw_args)
+                   rescue StandardError
+                     nil
+                   end
+                 end
+        return nil unless parsed.is_a?(Hash)
+
+        parsed["value"] || parsed[:value]
+      end
+
+      def unwrap_stage_result(raw_res, context, last_submitted_value = nil)
+        res_str = raw_res.to_s
+        match = res_str.match(/\ASuccessfully saved output to context key '(.+)'\z/m)
+        return raw_res unless match
+
+        key_name = match[1].to_s
+        saved_val = context.get(key_name.to_sym) if context.respond_to?(:get)
+        saved_str = saved_val.nil? ? nil : saved_val.to_s
+        if saved_str && !saved_str.strip.empty? && !saved_str.start_with?("Successfully saved output to context key '")
+          return saved_str
+        end
+
+        return last_submitted_value.to_s if last_submitted_value && !last_submitted_value.to_s.strip.empty?
+
+        raw_res
       end
 
       def record_stage_thought(stage_trace, data)
@@ -484,6 +530,8 @@ module Dalembert
           1. Suspect file paths and line ranges
           2. Relevant classes/methods/AST symbols
           3. Root cause hypothesis
+
+          Submit your final Localization Report via send_message(key: "localization_report", value: "<report>").
         PROMPT
       end
 
@@ -497,6 +545,7 @@ module Dalembert
           #{localization_report}
 
           Execute tests or reproduction commands to observe the bug failure (Red Light) and summarize the reproduction command and failure output.
+          Submit your Reproduction Report via send_message(key: "reproduction_report", value: "<report>").
         PROMPT
       end
 
@@ -513,6 +562,7 @@ module Dalembert
           #{reproduction_report}
 
           Apply the minimal surgical fix and run the test suite to verify Green Light and zero regressions.
+          Submit your final Patch & Verification Report via send_message(key: "patch_report", value: "<report>").
         PROMPT
       end
     end

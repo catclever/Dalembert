@@ -193,10 +193,18 @@ module Dalembert
         model: model
       )
 
+      # Pass a safe YAML profile name to Descartes base when resolved_config already carries base_url,
+      # avoiding premature RubyLLM::Profile.load errors on custom/env-driven profiles before @llm is replaced.
+      super_profile_name = if resolved_config[:base_url] && !resolved_config[:base_url].to_s.strip.empty?
+                             "default"
+                           else
+                             resolved_config[:profile_name] || profile_name
+                           end
+
       # Pass the resolved provider channel name to Descartes base
       super(
         name: name,
-        profile_name: resolved_config[:profile_name] || profile_name,
+        profile_name: super_profile_name,
         system_prompt: custom_system_prompt,
         tools: combined_tools,
         **kwargs
@@ -207,10 +215,27 @@ module Dalembert
       @model = resolved_config[:model]
       @mode = normalized_mode
       @enabled_tools = combined_tools
-      @tools = combined_tools
 
-      # Explicitly initialize or override @llm with resolved decoupled configuration
-      @llm = RubyLLM::LLMService.new(**resolved_config)
+      # Preserve Descartes default survival tools (e.g., send_message, write_working_note)
+      # added by super while still respecting explicit disabled_tools exclusions.
+      if defined?(@tools) && @tools.is_a?(Array)
+        @tools = @tools.reject do |t|
+          t_name = t.respond_to?(:tool_name) ? t.tool_name.to_s.strip.downcase : t.to_s.strip.downcase
+          disabled_names.include?(t_name) || disabled_classes.include?(t)
+        end
+      else
+        @tools = combined_tools
+      end
+
+      # Explicitly initialize or override @llm with resolved decoupled configuration.
+      # Omit :profile_name when base_url and api_key are already resolved so RubyLLM::LLMService
+      # does not require a matching entry in llm.yml for custom env-backed profiles.
+      llm_init_opts = resolved_config.dup
+      if llm_init_opts[:base_url] && !llm_init_opts[:base_url].to_s.strip.empty? &&
+         llm_init_opts[:api_key] && !llm_init_opts[:api_key].to_s.strip.empty?
+        llm_init_opts.delete(:profile_name)
+      end
+      @llm = RubyLLM::LLMService.new(**llm_init_opts)
     end
 
     private
