@@ -170,8 +170,8 @@ RSpec.describe Dalembert::HubExtension do
       %i[swe_bench_locate swe_bench_reproduce swe_bench_patch_and_verify].each do |stage_key|
         expect(stage_runtime_tools[stage_key].map(&:tool_name)).to include("send_message")
       end
-      expect(stage_budgets[:swe_bench_locate]).to eq(14)
-      expect(stage_budgets[:swe_bench_reproduce]).to eq(12)
+      expect(stage_budgets[:swe_bench_locate]).to eq(6)
+      expect(stage_budgets[:swe_bench_reproduce]).to eq(5)
 
       decoded = sent_frames.map { |f| decode_frame(f) }
       phase_events = decoded.select { |f| f[:type].to_s == "stream_event" && f[:event].to_s == "phase_change" }

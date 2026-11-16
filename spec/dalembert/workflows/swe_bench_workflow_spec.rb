@@ -344,7 +344,7 @@ RSpec.describe Dalembert::Workflows::SweBenchWorkflow do
       expect(stage_tools_snapshot[:swe_bench_patch_and_verify]).to include(write_file_tool, append_file_tool, manage_imports_tool, bash_tool)
     end
 
-    it "allocates segmented turn quotas (14 -> 12 -> rollover) and rolls unused turns into Stage 3" do
+    it "allocates segmented turn quotas (6 -> 5 -> rollover) and rolls unused turns into Stage 3" do
       stage_budgets = {}
       stage_system_prompts = {}
 
@@ -373,12 +373,12 @@ RSpec.describe Dalembert::Workflows::SweBenchWorkflow do
       result = workflow.execute(context, "Fix bug with rollover")
 
       expect(result).to eq("Patched and verified")
-      expect(stage_budgets[:swe_bench_locate]).to eq(14)
-      expect(stage_budgets[:swe_bench_reproduce]).to eq(12)
+      expect(stage_budgets[:swe_bench_locate]).to eq(6)
+      expect(stage_budgets[:swe_bench_reproduce]).to eq(5)
       expect(stage_budgets[:swe_bench_patch_and_verify]).to eq(40)
 
-      expect(stage_system_prompts[:swe_bench_locate]).to include("Stage turn budget: up to 14 turns. Call 'send_message'")
-      expect(stage_system_prompts[:swe_bench_reproduce]).to include("Stage turn budget: up to 12 turns. Call 'send_message'")
+      expect(stage_system_prompts[:swe_bench_locate]).to include("Stage turn budget: up to 6 turns. Call 'send_message'")
+      expect(stage_system_prompts[:swe_bench_reproduce]).to include("Stage turn budget: up to 5 turns. Call 'send_message'")
       expect(stage_system_prompts[:swe_bench_patch_and_verify]).to include("Stage turn budget: up to 40 turns. Call 'send_message'")
     end
 
@@ -419,8 +419,8 @@ RSpec.describe Dalembert::Workflows::SweBenchWorkflow do
       result = workflow.execute(context, "Fix bug via llm_calls")
       expect(result).to eq("Patch complete")
       expect(stage_budgets).to eq(
-        swe_bench_locate: 14,
-        swe_bench_reproduce: 12,
+        swe_bench_locate: 6,
+        swe_bench_reproduce: 5,
         swe_bench_patch_and_verify: 40
       )
       expect(forwarded_calls.size).to eq(5)
@@ -458,15 +458,15 @@ RSpec.describe Dalembert::Workflows::SweBenchWorkflow do
       res = workflow.execute(context, "Fix regex bug")
       expect(res).to eq("Green Light confirmed")
       expect(stage_budgets).to eq(
-        swe_bench_locate: 14,
-        swe_bench_reproduce: 12,
-        swe_bench_patch_and_verify: 30
+        swe_bench_locate: 6,
+        swe_bench_reproduce: 5,
+        swe_bench_patch_and_verify: 38
       )
       handoff = context.get(:localization_report)
-      expect(handoff).to start_with("[Stage :locate auto-handoff after 14 turn limit]\n")
+      expect(handoff).to start_with("[Stage :locate auto-handoff after 6 turn limit]\n")
       expect(handoff).to include("Found validator regex in django/contrib/auth/validators.py")
       expect(handoff).to include("validators.py")
-      expect(stage_prompts[:swe_bench_reproduce]).to include("[Stage :locate auto-handoff after 14 turn limit]")
+      expect(stage_prompts[:swe_bench_reproduce]).to include("[Stage :locate auto-handoff after 6 turn limit]")
     end
 
     it "advances gracefully with auto-handoff when Stage 2 exceeds its sub-stage turn cap" do
@@ -496,12 +496,12 @@ RSpec.describe Dalembert::Workflows::SweBenchWorkflow do
       res = workflow.execute(context, "Fix regex bug")
       expect(res).to eq("Green Light confirmed after Stage 2 auto-handoff")
       expect(stage_budgets).to eq(
-        swe_bench_locate: 14,
-        swe_bench_reproduce: 12,
-        swe_bench_patch_and_verify: 32
+        swe_bench_locate: 6,
+        swe_bench_reproduce: 5,
+        swe_bench_patch_and_verify: 39
       )
       handoff2 = context.get(:reproduction_report)
-      expect(handoff2).to start_with("[Stage :reproduce auto-handoff after 12 turn limit]\n")
+      expect(handoff2).to start_with("[Stage :reproduce auto-handoff after 5 turn limit]\n")
       expect(handoff2).to include("FAILED test_trailing_newline")
     end
 

@@ -91,6 +91,8 @@ module Dalembert
 
       STAGES = %i[locate reproduce patch_and_verify].freeze
       DEFAULT_MAX_TURNS = 45
+      LOCATE_MAX_CAP = 6
+      REPRODUCE_MAX_CAP = 5
       MAX_TURNS_EXCEEDED_PREFIX = "Error: Agent exceeded maximum allowed reasoning turns"
       STAGE_TRACE_LIMIT = 25
 
@@ -234,7 +236,7 @@ module Dalembert
         total_budget = (@max_turns.to_i > 0 ? [@max_turns.to_i, 3].max : DEFAULT_MAX_TURNS)
 
         # Stage 1: :locate (Bug Localization Funnel)
-        locate_budget = [[(total_budget * 0.30).ceil, 1].max, total_budget - 2].min
+        locate_budget = [[(total_budget * 0.20).ceil, 1].max, LOCATE_MAX_CAP, total_budget - 2].min
         emit_stage_banner(:locate, "Phase 1/3 [:locate] — Bug Localization Funnel (Read-Only Inspection)")
         res1, locate_used, trace1, submitted1 = run_stage_with_tracking(
           :locate,
@@ -256,7 +258,7 @@ module Dalembert
 
         # Stage 2: :reproduce (Minimal Reproduction Verification — Red Light)
         rem_after_1 = [total_budget - locate_used, 2].max
-        reproduce_budget = [[(total_budget * 0.25).ceil, 1].max, rem_after_1 - 1].min
+        reproduce_budget = [[(total_budget * 0.15).ceil, 1].max, REPRODUCE_MAX_CAP, rem_after_1 - 1].min
         emit_stage_banner(:reproduce, "Phase 2/3 [:reproduce] — Minimal Reproduction Verification (Red Light)")
         res2, reproduce_used, trace2, submitted2 = run_stage_with_tracking(
           :reproduce,
@@ -495,19 +497,25 @@ module Dalembert
                              when :locate
                                <<~PROMPT
                                  You are operating in Stage 1 (:locate — Bug Localization Funnel) of the SWE-bench workflow.
-                                 Strictly use read-only inspection tools to locate the exact files, classes, functions, line ranges, and root cause hypothesis.
-                                 Do NOT attempt to modify files or guess fixes without reading the source code.
+                                 Be fast and surgical (aim for 2-4 turns):
+                                 - Scope `grep_search` to narrow subdirectories with `max_results <= 30`; avoid repo-wide scans of release notes, migrations, or large data fixtures.
+                                 - Strictly use read-only inspection tools to locate the exact files, classes, functions, line ranges, and root cause hypothesis.
+                                 - As soon as the target implementation file(s) and relevant test file(s) are read and the root cause is clear, STOP exploring unrelated files and IMMEDIATELY call `send_message(key: "localization_report", value: "...")`.
+                                 - Do NOT attempt to modify files or guess fixes without reading the source code.
                                PROMPT
                              when :reproduce
                                <<~PROMPT
                                  You are operating in Stage 2 (:reproduce — Minimal Reproduction Verification) of the SWE-bench workflow.
-                                 Using the localization report from Stage 1, run existing tests or execute a minimal reproduction command in the sandbox to confirm the failure (Red Light).
-                                 Do NOT modify application business logic in this stage.
+                                 Be fast and surgical (aim for 1-3 turns):
+                                 - Using the localization report from Stage 1, run ONE targeted test or minimal `python -c` command via `run_verification` to observe the failure (Red Light).
+                                 - As soon as the failure is observed, IMMEDIATELY call `send_message(key: "reproduction_report", value: "...")`.
+                                 - Do NOT modify application business logic or test files in this stage.
                                PROMPT
                              when :patch_and_verify
                                <<~PROMPT
                                  You are operating in Stage 3 (:patch_and_verify — Surgical Patch & Regression Gate) of the SWE-bench workflow.
-                                 Apply a minimal, surgical patch addressing the root cause identified in Stage 1, then run the reproduction test from Stage 2 and relevant regression tests to confirm Green Light.
+                                 Apply a minimal, surgical patch ONLY to the necessary production source file(s) addressing the root cause identified in Stage 1 (do NOT leave temporary scripts or conflicting edits in test files unless specifically required by the issue, so `git diff` stays clean).
+                                 Then run the reproduction check from Stage 2 and relevant regression tests via `run_verification` to confirm Green Light, verify `get_status`, and call `send_message(key: "patch_report", value: "...")`.
                                PROMPT
                              end
 
