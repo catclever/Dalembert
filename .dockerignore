@@ -1,0 +1,9 @@
+.git
+spec
+benchmarks
+knowledge_vault
+.bundle
+vendor/bundle
+.env*
+llm.local.yml
+*.bak*

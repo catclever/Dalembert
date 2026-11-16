@@ -29,6 +29,23 @@ Task ID: dynamic_tool_masking_and_swe_bench_workflow_003
 ================================================================================
 =end
 
+=begin
+================================================================================
+Test Suite: Segmented Turn Quota, Unused-Turn Rollover & Auto-Handoff Specs
+Task ID: hub_session_swe_bench_routing_and_budget_005
+
+1. Problem / Feature Tested:
+   - Validates `append_file` and `manage_imports` classification as `:write_local`
+     (masked in Stage 1 & 2, unlocked in Stage 3).
+   - Validates `DEFAULT_MAX_TURNS == 45` and Option A segmented turn budgeting
+     (`14` -> `12` -> rollover remainder) across `build_stage_agent` and `execute`.
+   - Validates turn tracking via `agent.llm.call_with_system` and fallback via
+     `tool_turns` / `MAX_TURNS_EXCEEDED_PREFIX`.
+   - Validates graceful auto-handoff on `MAX_TURNS_EXCEEDED_PREFIX` vs immediate
+     short-circuiting on all other `"Error: ..."` responses.
+================================================================================
+=end
+
 module RubyLLM
   class LLMService
     attr_reader :model unless method_defined?(:model)
@@ -51,16 +68,18 @@ RSpec.describe Dalembert::Workflows::SweBenchWorkflow do
     end
   end
 
-  let(:read_file_tool)    { build_tool_class("read_file") }
-  let(:grep_tool)         { build_tool_class("ripgrep") }
-  let(:outline_tool)      { build_tool_class("get_outline") }
-  let(:bash_tool)         { build_tool_class("bash") }
-  let(:run_test_tool)     { build_tool_class("run_test") }
-  let(:pytest_tool)       { build_tool_class("pytest") }
-  let(:write_file_tool)   { build_tool_class("write_file") }
-  let(:edit_file_tool)    { build_tool_class("edit_file") }
-  let(:apply_patch_tool)  { build_tool_class("apply_patch") }
-  let(:ast_replace_tool)  { build_tool_class("ast_replace") }
+  let(:read_file_tool)      { build_tool_class("read_file") }
+  let(:grep_tool)           { build_tool_class("ripgrep") }
+  let(:outline_tool)        { build_tool_class("get_outline") }
+  let(:bash_tool)           { build_tool_class("bash") }
+  let(:run_test_tool)       { build_tool_class("run_test") }
+  let(:pytest_tool)         { build_tool_class("pytest") }
+  let(:write_file_tool)     { build_tool_class("write_file") }
+  let(:append_file_tool)    { build_tool_class("append_file") }
+  let(:edit_file_tool)      { build_tool_class("edit_file") }
+  let(:manage_imports_tool) { build_tool_class("manage_imports") }
+  let(:apply_patch_tool)    { build_tool_class("apply_patch") }
+  let(:ast_replace_tool)    { build_tool_class("ast_replace") }
 
   let(:all_local_tools) do
     [
@@ -71,7 +90,9 @@ RSpec.describe Dalembert::Workflows::SweBenchWorkflow do
       run_test_tool,
       pytest_tool,
       write_file_tool,
+      append_file_tool,
       edit_file_tool,
+      manage_imports_tool,
       apply_patch_tool,
       ast_replace_tool
     ]
@@ -86,9 +107,11 @@ RSpec.describe Dalembert::Workflows::SweBenchWorkflow do
       expect(described_class.classify_tool(Dalembert::Tools::KnowledgeStoreTool)).to eq(:cloud_osint)
     end
 
-    it "classifies file mutation tools as :write_local" do
+    it "classifies file mutation tools (including append_file and manage_imports) as :write_local" do
       expect(described_class.classify_tool(write_file_tool)).to eq(:write_local)
+      expect(described_class.classify_tool(append_file_tool)).to eq(:write_local)
       expect(described_class.classify_tool(edit_file_tool)).to eq(:write_local)
+      expect(described_class.classify_tool(manage_imports_tool)).to eq(:write_local)
       expect(described_class.classify_tool(apply_patch_tool)).to eq(:write_local)
       expect(described_class.classify_tool(ast_replace_tool)).to eq(:write_local)
       expect(described_class.classify_tool(build_tool_class("replace_file_content"))).to eq(:write_local)
@@ -115,6 +138,14 @@ RSpec.describe Dalembert::Workflows::SweBenchWorkflow do
     end
   end
 
+  describe "#initialize" do
+    it "defaults max_turns to DEFAULT_MAX_TURNS (45)" do
+      workflow = described_class.new(tools: all_local_tools)
+      expect(described_class::DEFAULT_MAX_TURNS).to eq(45)
+      expect(workflow.max_turns).to eq(45)
+    end
+  end
+
   describe "#phase_tools_for" do
     let(:workflow) do
       described_class.new(
@@ -137,7 +168,9 @@ RSpec.describe Dalembert::Workflows::SweBenchWorkflow do
         run_test_tool,
         pytest_tool,
         write_file_tool,
+        append_file_tool,
         edit_file_tool,
+        manage_imports_tool,
         apply_patch_tool,
         ast_replace_tool,
         Dalembert::Tools::GithubRepoSurvey,
@@ -159,7 +192,9 @@ RSpec.describe Dalembert::Workflows::SweBenchWorkflow do
       )
       expect(reproduce_tools).not_to include(
         write_file_tool,
+        append_file_tool,
         edit_file_tool,
+        manage_imports_tool,
         apply_patch_tool,
         ast_replace_tool,
         Dalembert::Tools::GithubRepoSurvey,
@@ -178,7 +213,9 @@ RSpec.describe Dalembert::Workflows::SweBenchWorkflow do
         run_test_tool,
         pytest_tool,
         write_file_tool,
+        append_file_tool,
         edit_file_tool,
+        manage_imports_tool,
         apply_patch_tool,
         ast_replace_tool,
         Dalembert::Tools::DocFetcher
@@ -215,7 +252,9 @@ RSpec.describe Dalembert::Workflows::SweBenchWorkflow do
         bash_tool,
         run_test_tool,
         write_file_tool,
+        append_file_tool,
         edit_file_tool,
+        manage_imports_tool,
         apply_patch_tool
       )
     end
@@ -299,10 +338,171 @@ RSpec.describe Dalembert::Workflows::SweBenchWorkflow do
       expect(stage_prompts[:swe_bench_patch_and_verify]).to include("Suspect file: app.py:10-20, off-by-one error")
       expect(stage_prompts[:swe_bench_patch_and_verify]).to include("Red Light confirmed: pytest test_app.py failed with AssertionError")
 
-      expect(stage_tools_snapshot[:swe_bench_locate]).not_to include(write_file_tool, bash_tool)
+      expect(stage_tools_snapshot[:swe_bench_locate]).not_to include(write_file_tool, append_file_tool, manage_imports_tool, bash_tool)
       expect(stage_tools_snapshot[:swe_bench_reproduce]).to include(bash_tool)
-      expect(stage_tools_snapshot[:swe_bench_reproduce]).not_to include(write_file_tool)
-      expect(stage_tools_snapshot[:swe_bench_patch_and_verify]).to include(write_file_tool, bash_tool)
+      expect(stage_tools_snapshot[:swe_bench_reproduce]).not_to include(write_file_tool, append_file_tool, manage_imports_tool)
+      expect(stage_tools_snapshot[:swe_bench_patch_and_verify]).to include(write_file_tool, append_file_tool, manage_imports_tool, bash_tool)
+    end
+
+    it "allocates segmented turn quotas (14 -> 12 -> rollover) and rolls unused turns into Stage 3" do
+      stage_budgets = {}
+      stage_system_prompts = {}
+
+      allow(Dalembert::Agent).to receive(:new).and_wrap_original { |orig, **kwargs|
+        agent = orig.call(**kwargs)
+        stage_name = kwargs[:name]
+        stage_budgets[stage_name] = kwargs[:max_turns]
+        stage_system_prompts[stage_name] = kwargs[:system_prompt]
+
+        allow(agent).to receive(:execute) do |_ctx, _stage_prompt|
+          case stage_name
+          when :swe_bench_locate
+            3.times { |i| agent.send(:emit, :tool_call_start, { tool: "read_file", args: { "step" => i } }) }
+            "Localized root cause in 3 turns"
+          when :swe_bench_reproduce
+            2.times { |i| agent.send(:emit, :tool_call_start, { tool: "bash", args: { "step" => i } }) }
+            "Reproduced failure in 2 turns"
+          when :swe_bench_patch_and_verify
+            "Patched and verified"
+          end
+        end
+
+        agent
+      }
+
+      result = workflow.execute(context, "Fix bug with rollover")
+
+      expect(result).to eq("Patched and verified")
+      expect(stage_budgets[:swe_bench_locate]).to eq(14)
+      expect(stage_budgets[:swe_bench_reproduce]).to eq(12)
+      expect(stage_budgets[:swe_bench_patch_and_verify]).to eq(40)
+
+      expect(stage_system_prompts[:swe_bench_locate]).to include("Stage turn budget: up to 14 turns. Call 'send_message'")
+      expect(stage_system_prompts[:swe_bench_reproduce]).to include("Stage turn budget: up to 12 turns. Call 'send_message'")
+      expect(stage_system_prompts[:swe_bench_patch_and_verify]).to include("Stage turn budget: up to 40 turns. Call 'send_message'")
+    end
+
+    it "tracks actual LLM invocations via call_with_system wrapping and forwards args cleanly" do
+      stage_budgets = {}
+      forwarded_calls = []
+
+      allow(Dalembert::Agent).to receive(:new).and_wrap_original { |orig, **kwargs|
+        agent = orig.call(**kwargs)
+        stage_name = kwargs[:name]
+        stage_budgets[stage_name] = kwargs[:max_turns]
+
+        llm = agent.llm
+        allow(llm).to receive(:call_with_system) do |sys, msgs, **opts|
+          forwarded_calls << [stage_name, sys, msgs, opts]
+          "llm_ok"
+        end
+
+        allow(agent).to receive(:execute) do |_ctx, _stage_prompt|
+          case stage_name
+          when :swe_bench_locate
+            # 3 LLM invocations, even with 5 tool calls emitted inside them
+            3.times { llm.call_with_system("sys", ["msg"], tools: []) }
+            5.times { |i| agent.send(:emit, :tool_call_start, { tool: "read_file", args: { "i" => i } }) }
+            "Locate complete"
+          when :swe_bench_reproduce
+            2.times { llm.call_with_system("sys", ["msg"]) }
+            4.times { |i| agent.send(:emit, :tool_call_start, { tool: "bash", args: { "i" => i } }) }
+            "Reproduce complete"
+          when :swe_bench_patch_and_verify
+            "Patch complete"
+          end
+        end
+
+        agent
+      }
+
+      result = workflow.execute(context, "Fix bug via llm_calls")
+      expect(result).to eq("Patch complete")
+      expect(stage_budgets).to eq(
+        swe_bench_locate: 14,
+        swe_bench_reproduce: 12,
+        swe_bench_patch_and_verify: 40
+      )
+      expect(forwarded_calls.size).to eq(5)
+      expect(forwarded_calls.first[3]).to eq(tools: [])
+      expect(forwarded_calls.last[3]).to eq({})
+    end
+
+    it "advances gracefully with auto-handoff when Stage 1 exceeds its sub-stage turn cap" do
+      stage_budgets = {}
+      stage_prompts = {}
+
+      allow(Dalembert::Agent).to receive(:new).and_wrap_original { |orig, **kwargs|
+        agent = orig.call(**kwargs)
+        stage_name = kwargs[:name]
+        stage_budgets[stage_name] = kwargs[:max_turns]
+
+        allow(agent).to receive(:execute) do |_ctx, stage_prompt|
+          stage_prompts[stage_name] = stage_prompt
+          case stage_name
+          when :swe_bench_locate
+            agent.send(:emit, :thought, "Found validator regex in django/contrib/auth/validators.py")
+            agent.send(:emit, :tool_call_start, { tool: "read_file", args: { "path" => "validators.py" } })
+            agent.send(:emit, :tool_call_end, { tool: "read_file", result: "regex = r'^[\\w.@+-]+$'" })
+            "Error: Agent exceeded maximum allowed reasoning turns."
+          when :swe_bench_reproduce
+            "Red Light confirmed from auto-handoff"
+          when :swe_bench_patch_and_verify
+            "Green Light confirmed"
+          end
+        end
+
+        agent
+      }
+
+      res = workflow.execute(context, "Fix regex bug")
+      expect(res).to eq("Green Light confirmed")
+      expect(stage_budgets).to eq(
+        swe_bench_locate: 14,
+        swe_bench_reproduce: 12,
+        swe_bench_patch_and_verify: 30
+      )
+      handoff = context.get(:localization_report)
+      expect(handoff).to start_with("[Stage :locate auto-handoff after 14 turn limit]\n")
+      expect(handoff).to include("Found validator regex in django/contrib/auth/validators.py")
+      expect(handoff).to include("validators.py")
+      expect(stage_prompts[:swe_bench_reproduce]).to include("[Stage :locate auto-handoff after 14 turn limit]")
+    end
+
+    it "advances gracefully with auto-handoff when Stage 2 exceeds its sub-stage turn cap" do
+      stage_budgets = {}
+
+      allow(Dalembert::Agent).to receive(:new).and_wrap_original { |orig, **kwargs|
+        agent = orig.call(**kwargs)
+        stage_name = kwargs[:name]
+        stage_budgets[stage_name] = kwargs[:max_turns]
+
+        allow(agent).to receive(:execute) do |_ctx, _stage_prompt|
+          case stage_name
+          when :swe_bench_locate
+            "Localized to validators.py"
+          when :swe_bench_reproduce
+            agent.send(:emit, :tool_call_start, { tool: "run_test", args: { "cmd" => "pytest" } })
+            agent.send(:emit, :tool_call_end, { tool: "run_test", result: "FAILED test_trailing_newline" })
+            "Error: Agent exceeded maximum allowed reasoning turns."
+          when :swe_bench_patch_and_verify
+            "Green Light confirmed after Stage 2 auto-handoff"
+          end
+        end
+
+        agent
+      }
+
+      res = workflow.execute(context, "Fix regex bug")
+      expect(res).to eq("Green Light confirmed after Stage 2 auto-handoff")
+      expect(stage_budgets).to eq(
+        swe_bench_locate: 14,
+        swe_bench_reproduce: 12,
+        swe_bench_patch_and_verify: 32
+      )
+      handoff2 = context.get(:reproduction_report)
+      expect(handoff2).to start_with("[Stage :reproduce auto-handoff after 12 turn limit]\n")
+      expect(handoff2).to include("FAILED test_trailing_newline")
     end
 
     it "halts immediately if Stage 1 (:locate) returns an Error response" do

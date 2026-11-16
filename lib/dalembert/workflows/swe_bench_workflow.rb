@@ -49,14 +49,51 @@ Task ID: dynamic_tool_masking_and_swe_bench_workflow_003
 ================================================================================
 =end
 
+=begin
+================================================================================
+Feature: Segmented Turn Quota, Unused-Turn Rollover & Graceful Sub-Stage Handoff
+Task ID: hub_session_swe_bench_routing_and_budget_005
+
+1. Problem / Feature Implemented:
+   - Passing the full `max_turns` budget identically to each of the 3 SWE-bench
+     stages allowed Stage 1 (`:locate`) or Stage 2 (`:reproduce`) to exhaust up to 3x
+     the intended session budget, or fail fatally when hitting the turn limit despite
+     having gathered useful localization/reproduction findings.
+   - Additionally, `append_file` and `manage_imports` edge tools were previously
+     classified as `:read_local` rather than `:write_local`.
+
+2. Method / Logic Used:
+   - Raised `DEFAULT_MAX_TURNS` to `45` and expanded `WRITE_LOCAL_PATTERN` to include
+     `append_` and `manage_imports`.
+   - Implemented Option A Segmented Turn Quota + Unused-Turn Rollover:
+     - Stage 1 (`:locate`): `ceil(total * 0.30)` (clamped to `1..total - 2`, 14 for 45).
+     - Stage 2 (`:reproduce`): `ceil(total * 0.25)` (clamped to `1..rem_after_1 - 1`, 12 for 45).
+     - Stage 3 (`:patch_and_verify`): receives 100% of remaining unused turns (`[rem_after_1 - reproduce_used, 1].max`).
+   - Tracks consumed turns by wrapping `agent.llm.call_with_system` (falling back
+     to `tool_turns` or `stage_budget` when mocked without `call_with_system`) and
+     captures a bounded 25-entry `stage_trace` of thoughts and tool events.
+   - When Stage 1 or Stage 2 returns `MAX_TURNS_EXCEEDED_PREFIX`, synthesizes a
+     structured auto-handoff report from `stage_trace` and advances cleanly to the
+     next stage; all other `"Error: ..."` responses still halt immediately.
+
+3. Caveats & Future Development Considerations:
+   - Do NOT pass keyword arguments (`run_max_turns:`) to `agent.execute(...)`; pass
+     per-stage budgets via `max_turns:` in `Dalembert::Agent.new` so 2-argument
+     test stubs on `agent.execute` remain compatible.
+================================================================================
+=end
+
 module Dalembert
   module Workflows
     class SweBenchWorkflow
       include Descartes::EventEmitter if defined?(Descartes::EventEmitter)
 
       STAGES = %i[locate reproduce patch_and_verify].freeze
+      DEFAULT_MAX_TURNS = 45
+      MAX_TURNS_EXCEEDED_PREFIX = "Error: Agent exceeded maximum allowed reasoning turns"
+      STAGE_TRACE_LIMIT = 25
 
-      WRITE_LOCAL_PATTERN = /\A(write_|edit_|replace_|apply_patch|patch|ast_replace|create_file|delete_file|modify_|str_replace)/i
+      WRITE_LOCAL_PATTERN = /\A(write_|append_|edit_|replace_|manage_imports|apply_patch|patch|ast_replace|create_file|delete_file|modify_|str_replace)/i
       EXEC_SANDBOX_PATTERN = /\A(bash|sh|shell|run_|exec|execute|test|pytest|rspec|cargo)/i
 
       attr_reader :profile_name, :model, :tools, :cloud_tools, :disabled_tools,
@@ -108,7 +145,7 @@ module Dalembert
         cloud_tools: nil,
         disabled_tools: nil,
         system_prompt: nil,
-        max_turns: 30,
+        max_turns: DEFAULT_MAX_TURNS,
         logger: nil,
         **kwargs
       )
@@ -117,7 +154,7 @@ module Dalembert
         @cloud_tools = cloud_tools
         @disabled_tools = disabled_tools
         @system_prompt = system_prompt
-        @max_turns = max_turns
+        @max_turns = max_turns.nil? ? DEFAULT_MAX_TURNS : max_turns
         @logger = logger
         @extra_kwargs = kwargs
         @listeners ||= Hash.new { |h, k| h[k] = [] }
@@ -186,30 +223,65 @@ module Dalembert
         end
       end
 
-      # Executes the 3-stage SWE-bench workflow (:locate -> :reproduce -> :patch_and_verify).
+      # Executes the 3-stage SWE-bench workflow (:locate -> :reproduce -> :patch_and_verify)
+      # using segmented turn quotas, unused-turn rollover, and graceful turn-cap auto-handoff.
       #
       # @param context [Descartes::Context] Execution context
       # @param prompt [String] Issue description / task prompt
       # @return [String] Final patch and verification report, or early error string
       def execute(context, prompt)
+        total_budget = (@max_turns.to_i > 0 ? [@max_turns.to_i, 3].max : DEFAULT_MAX_TURNS)
+
         # Stage 1: :locate (Bug Localization Funnel)
+        locate_budget = [[(total_budget * 0.30).ceil, 1].max, total_budget - 2].min
         emit_stage_banner(:locate, "Phase 1/3 [:locate] — Bug Localization Funnel (Read-Only Inspection)")
-        locate_agent = build_stage_agent(:locate)
-        res1 = locate_agent.execute(context, build_locate_prompt(prompt))
-        context.set(:localization_report, res1) if context.respond_to?(:set)
-        return res1 if error_response?(res1)
+        res1, locate_used, trace1 = run_stage_with_tracking(
+          :locate,
+          locate_budget,
+          context,
+          build_locate_prompt(prompt)
+        )
+        if max_turns_exceeded?(res1)
+          res1 = synthesize_auto_handoff(:locate, locate_budget, trace1)
+          emit(:thought, "\n[SWE-bench Workflow] Stage :locate reached #{locate_budget}-turn cap; advancing with auto-handoff.\n")
+          context.set(:localization_report, res1) if context.respond_to?(:set)
+        elsif error_response?(res1)
+          context.set(:localization_report, res1) if context.respond_to?(:set)
+          return res1
+        else
+          context.set(:localization_report, res1) if context.respond_to?(:set)
+        end
 
         # Stage 2: :reproduce (Minimal Reproduction Verification — Red Light)
+        rem_after_1 = [total_budget - locate_used, 2].max
+        reproduce_budget = [[(total_budget * 0.25).ceil, 1].max, rem_after_1 - 1].min
         emit_stage_banner(:reproduce, "Phase 2/3 [:reproduce] — Minimal Reproduction Verification (Red Light)")
-        reproduce_agent = build_stage_agent(:reproduce)
-        res2 = reproduce_agent.execute(context, build_reproduce_prompt(prompt, res1))
-        context.set(:reproduction_report, res2) if context.respond_to?(:set)
-        return res2 if error_response?(res2)
+        res2, reproduce_used, trace2 = run_stage_with_tracking(
+          :reproduce,
+          reproduce_budget,
+          context,
+          build_reproduce_prompt(prompt, res1)
+        )
+        if max_turns_exceeded?(res2)
+          res2 = synthesize_auto_handoff(:reproduce, reproduce_budget, trace2)
+          emit(:thought, "\n[SWE-bench Workflow] Stage :reproduce reached #{reproduce_budget}-turn cap; advancing with auto-handoff.\n")
+          context.set(:reproduction_report, res2) if context.respond_to?(:set)
+        elsif error_response?(res2)
+          context.set(:reproduction_report, res2) if context.respond_to?(:set)
+          return res2
+        else
+          context.set(:reproduction_report, res2) if context.respond_to?(:set)
+        end
 
         # Stage 3: :patch_and_verify (Surgical Patch & Regression Gate — Green Light)
+        patch_budget = [rem_after_1 - reproduce_used, 1].max
         emit_stage_banner(:patch_and_verify, "Phase 3/3 [:patch_and_verify] — Surgical Patch & Regression Gate (Green Light)")
-        patch_agent = build_stage_agent(:patch_and_verify)
-        res3 = patch_agent.execute(context, build_patch_and_verify_prompt(prompt, res1, res2))
+        res3, _patch_used, _trace3 = run_stage_with_tracking(
+          :patch_and_verify,
+          patch_budget,
+          context,
+          build_patch_and_verify_prompt(prompt, res1, res2)
+        )
         context.set(:patch_report, res3) if context.respond_to?(:set)
         res3
       end
@@ -221,7 +293,8 @@ module Dalembert
         emit(:thought, "\n=== [SWE-bench Workflow] #{message} ===\n")
       end
 
-      def build_stage_agent(stage)
+      def build_stage_agent(stage, stage_max_turns: @max_turns)
+        effective_max_turns = stage_max_turns.to_i > 0 ? stage_max_turns.to_i : @max_turns
         stage_tools = phase_tools_for(stage)
         agent = Dalembert::Agent.new(
           name: :"swe_bench_#{stage}",
@@ -231,8 +304,8 @@ module Dalembert
           cloud_tools: [],
           disabled_tools: @disabled_tools,
           mode: "swe_bench",
-          system_prompt: stage_system_prompt(stage),
-          max_turns: @max_turns,
+          system_prompt: stage_system_prompt(stage, effective_max_turns),
+          max_turns: effective_max_turns,
           logger: @logger,
           **@extra_kwargs
         )
@@ -248,12 +321,129 @@ module Dalembert
         agent
       end
 
+      def run_stage_with_tracking(stage, stage_budget, context, stage_prompt)
+        agent = build_stage_agent(stage, stage_max_turns: stage_budget)
+
+        llm_calls = 0
+        tool_turns = 0
+        stage_trace = []
+
+        llm = agent.respond_to?(:llm) ? agent.llm : nil
+        if llm && llm.respond_to?(:call_with_system) && !llm.frozen?
+          counter_proc = -> { llm_calls += 1 }
+          llm.instance_variable_set(:@_dalembert_stage_turn_hook, counter_proc)
+
+          unless llm.instance_variable_defined?(:@_dalembert_call_wrapped)
+            orig_call = begin
+              llm.method(:call_with_system)
+            rescue NameError
+              nil
+            end
+
+            if orig_call
+              llm.instance_variable_set(:@_dalembert_call_wrapped, true)
+              llm.define_singleton_method(:call_with_system) do |*args, **kwargs, &block|
+                hook = instance_variable_get(:@_dalembert_stage_turn_hook)
+                hook&.call
+                if kwargs.empty?
+                  orig_call.call(*args, &block)
+                else
+                  orig_call.call(*args, **kwargs, &block)
+                end
+              end
+            end
+          end
+        end
+
+        if agent.respond_to?(:on)
+          agent.on(:thought) do |data|
+            record_stage_thought(stage_trace, data)
+          end
+          agent.on(:tool_call_start) do |data|
+            tool_turns += 1
+            record_stage_tool_start(stage_trace, data)
+          end
+          agent.on(:tool_call_end) do |data|
+            record_stage_tool_end(stage_trace, data)
+          end
+        end
+
+        res = agent.execute(context, stage_prompt)
+
+        used = if llm_calls > 0
+                 [llm_calls, stage_budget].min
+               elsif max_turns_exceeded?(res)
+                 stage_budget
+               else
+                 [[tool_turns, 1].max, stage_budget].min
+               end
+
+        [res, used, stage_trace]
+      end
+
+      def record_stage_thought(stage_trace, data)
+        text = if data.is_a?(Hash)
+                 data[:text] || data["text"] || data[:content] || data["content"] || data.inspect
+               else
+                 data.to_s
+               end
+        cleaned = text.to_s.strip
+        return if cleaned.empty?
+
+        push_trace_entry(stage_trace, "[thought] #{truncate_trace(cleaned, 400)}")
+      end
+
+      def record_stage_tool_start(stage_trace, data)
+        entry = if data.is_a?(Hash)
+                  tool = data[:tool] || data["tool"] || data[:name] || data["name"] || "unknown"
+                  args = data[:args] || data["args"] || data[:arguments] || data["arguments"]
+                  args_str = args ? truncate_trace(args.inspect, 200) : ""
+                  args_str.empty? ? "[tool_start] #{tool}" : "[tool_start] #{tool} #{args_str}"
+                else
+                  "[tool_start] #{truncate_trace(data.to_s.strip, 200)}"
+                end
+        push_trace_entry(stage_trace, entry)
+      end
+
+      def record_stage_tool_end(stage_trace, data)
+        entry = if data.is_a?(Hash)
+                  tool = data[:tool] || data["tool"] || data[:name] || data["name"] || "unknown"
+                  res = data[:result] || data["result"] || data[:output] || data["output"]
+                  res_str = res ? truncate_trace(res.to_s.strip, 300) : ""
+                  res_str.empty? ? "[tool_end] #{tool}" : "[tool_end] #{tool} => #{res_str}"
+                else
+                  "[tool_end] #{truncate_trace(data.to_s.strip, 300)}"
+                end
+        push_trace_entry(stage_trace, entry)
+      end
+
+      def push_trace_entry(stage_trace, entry)
+        stage_trace << entry
+        stage_trace.shift while stage_trace.length > STAGE_TRACE_LIMIT
+      end
+
+      def truncate_trace(str, limit)
+        return str if str.length <= limit
+
+        "#{str[0, limit]}..."
+      end
+
+      def synthesize_auto_handoff(stage, budget, stage_trace)
+        summary = stage_trace.empty? ? "(no intermediate trace events recorded)" : stage_trace.join("\n")
+        "[Stage :#{stage} auto-handoff after #{budget} turn limit]\n#{summary}"
+      end
+
+      def max_turns_exceeded?(response)
+        response.to_s.strip.start_with?(MAX_TURNS_EXCEEDED_PREFIX)
+      end
+
       def error_response?(response)
         response.to_s.strip.start_with?("Error:")
       end
 
-      def stage_system_prompt(stage)
-        base_prefix = @system_prompt ? "#{@system_prompt}\n\n" : ""
+      def stage_system_prompt(stage, stage_budget = nil)
+        has_custom = @system_prompt && !@system_prompt.to_s.strip.empty?
+        base_prefix = has_custom ? "#{@system_prompt}\n\n" : ""
 
         stage_instructions = case stage.to_sym
                              when :locate
@@ -275,7 +465,13 @@ module Dalembert
                                PROMPT
                              end
 
-        "#{base_prefix}#{stage_instructions}".strip
+        budget_guidance = if stage_budget && stage_budget.to_i > 0
+                            "\n\nStage turn budget: up to #{stage_budget.to_i} turns. Call 'send_message' to submit your stage report before exhausting this budget."
+                          else
+                            ""
+                          end
+
+        "#{base_prefix}#{stage_instructions.strip}#{budget_guidance}".strip
       end
 
       def build_locate_prompt(prompt)

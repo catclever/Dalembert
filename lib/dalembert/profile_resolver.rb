@@ -43,6 +43,26 @@ Task ID: multi_provider_model_selection_001
 ================================================================================
 =end
 
+=begin
+================================================================================
+Feature: 12-Factor LLM_API_KEY Precedence Under LLM_BASE_URL Override
+Task ID: hub_session_swe_bench_routing_and_budget_005
+
+1. Problem / Feature Implemented:
+   - In Docker/Railway 12-Factor deployments, `llm.example.yml` sets `default.api_key`
+     to `"ENV['DEEPSEEK_API_KEY']"`. When an operator configures `LLM_BASE_URL`,
+     `LLM_API_KEY`, and `model: "hy4"` alongside a populated `DEEPSEEK_API_KEY`,
+     `cfg_api_key` previously shadowed `ENV["LLM_API_KEY"]`, sending the wrong key
+     to the `LLM_BASE_URL` endpoint.
+
+2. Method / Logic Used:
+   - When `!is_explicit` and `ENV["LLM_BASE_URL"]` is non-blank, non-empty
+     `ENV["LLM_API_KEY"]` takes precedence over `cfg_api_key`, while preserving
+     all existing resolution order when `LLM_BASE_URL` is absent or an explicit
+     profile is requested.
+================================================================================
+=end
+
 module Dalembert
   class ProfileResolver
     DEFAULT_PROFILE = "default"
@@ -86,20 +106,31 @@ module Dalembert
         # Decouple channel settings
         format = provider_section["format"] || provider_section[:format] || DEFAULT_FORMAT
 
+        env_base_url = ENV["LLM_BASE_URL"] && !ENV["LLM_BASE_URL"].strip.empty? ? ENV["LLM_BASE_URL"].strip : nil
+        env_api_key  = ENV["LLM_API_KEY"] && !ENV["LLM_API_KEY"].strip.empty? ? ENV["LLM_API_KEY"].strip : nil
+
         cfg_base_url = resolve_env_value(provider_section["base_url"] || provider_section[:base_url])
         base_url = if is_explicit
                      # Explicit profile: prevent ENV["LLM_BASE_URL"] from hijacking channel
                      cfg_base_url || resolve_env_value(ENV["#{provider.upcase}_BASE_URL"])
                    else
                      # Zero-config 12-factor fallback: ENV["LLM_BASE_URL"] takes precedence
-                     ENV["LLM_BASE_URL"] || cfg_base_url
+                     env_base_url || cfg_base_url
                    end
 
         cfg_api_key = resolve_env_value(provider_section["api_key"] || provider_section[:api_key])
-        api_key = cfg_api_key ||
-                  resolve_env_value(ENV["#{provider.upcase}_API_KEY"]) ||
-                  (!is_explicit ? ENV["LLM_API_KEY"] : nil) ||
-                  ENV["DEEPSEEK_API_KEY"]
+        api_key = if !is_explicit && env_base_url
+                    # Under 12-factor LLM_BASE_URL zero-config, ENV["LLM_API_KEY"] must not be shadowed by default.api_key
+                    env_api_key ||
+                      cfg_api_key ||
+                      resolve_env_value(ENV["#{provider.upcase}_API_KEY"]) ||
+                      ENV["DEEPSEEK_API_KEY"]
+                  else
+                    cfg_api_key ||
+                      resolve_env_value(ENV["#{provider.upcase}_API_KEY"]) ||
+                      (!is_explicit ? env_api_key : nil) ||
+                      ENV["DEEPSEEK_API_KEY"]
+                  end
 
         # Resolve Model: explicit param > parsed composite model > config > ENV["LLM_MODEL"] > default
         cfg_model = resolve_env_value(provider_section["model"] || provider_section[:model])

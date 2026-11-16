@@ -21,7 +21,7 @@ Task ID: multi_provider_model_selection_001
    - Defined `build_agent_for_session` to accept incoming session payload hashes,
      extracting `llm_profile` (or fallback to ENV["LLM_PROFILE"] / "default") and
      `model` / `llm_model`, passing them into Dalembert::Agent.new.
-   - Prepended `Dalembert::HubExtension` onto `Descartes::Hub::Server` to intercept
+   - Prepended server extension onto `Descartes::Hub::Server` to intercept
      `create_agent` and `dispatch_session`, normalizing both symbol and string keys
      for `llm_profile`, `model`, and `llm_model`.
    - Passed `agent_factory` to `Descartes::Hub::Server.new` with graceful fallback
@@ -49,7 +49,7 @@ Task ID: dynamic_tool_masking_and_swe_bench_workflow_003
    - Updated `build_agent_for_session(payload = {})` to extract `mode`,
      `cloud_tools`, and `disabled_tools` (handling both symbol and string keys,
      and preserving explicit empty arrays `[]` for `cloud_tools`).
-   - Updated `Dalembert::HubExtension#dispatch_session` to normalize `mode`,
+   - Updated server `dispatch_session` to normalize `mode`,
      `cloud_tools`, and `disabled_tools` across both symbol and string keys.
 
 3. Caveats & Future Development Considerations:
@@ -58,11 +58,30 @@ Task ID: dynamic_tool_masking_and_swe_bench_workflow_003
 ================================================================================
 =end
 
+=begin
+================================================================================
+Feature: Hub Session Extension Activation & Consistent SweBenchWorkflow Factory
+Task ID: hub_session_swe_bench_routing_and_budget_005
+
+1. Problem / Feature Implemented:
+   - `descartes/hub` is required after `dalembert`, so `Dalembert::HubExtension.install!`
+     must be explicitly invoked right after `require "descartes/hub"` to patch
+     `Descartes::Hub::Session`.
+   - `build_agent_for_session` is also aligned to instantiate
+     `Dalembert::Workflows::SweBenchWorkflow` for `"swe_bench"` / `"bug_hunter"`
+     modes with `DEFAULT_MAX_TURNS = 45` and default `cloud_tools: []` when omitted
+     in `"swe_bench"` mode.
+================================================================================
+=end
+
 $LOAD_PATH.unshift(File.expand_path("../lib", __dir__))
 
 require "dalembert"
 require "descartes"
 require "descartes/hub"
+
+Dalembert::HubExtension.install! if defined?(Dalembert::HubExtension) && Dalembert::HubExtension.respond_to?(:install!)
+
 require "puma"
 require "puma/configuration"
 require "puma/launcher"
@@ -77,22 +96,32 @@ OptionParser.new do |opts|
   opts.on("-h", "--host HOST", String, "Host to bind to (default: #{host})") { |v| host = v }
 end.parse!
 
-# Helper to build an agent for an incoming session payload
+# Helper to build an agent or workflow for an incoming session payload
 def build_agent_for_session(payload = {})
   payload = {} unless payload.is_a?(Hash)
 
   raw_profile = payload[:llm_profile] || payload["llm_profile"] ||
                 payload[:profile] || payload["profile"] ||
-                ENV["LLM_PROFILE"] || "default"
+                ENV["LLM_PROFILE"] || ENV["DEFAULT_LLM_PROFILE"] || "default"
 
   raw_model   = payload[:model] || payload["model"] ||
-                payload[:llm_model] || payload["llm_model"] ||
-                ENV["LLM_MODEL"]
+                payload[:llm_model] || payload["llm_model"]
 
-  max_turns   = (payload[:max_turns] || payload["max_turns"] || ENV["MAX_TURNS"] || 30).to_i
+  raw_mode    = payload[:mode] || payload["mode"] ||
+                payload[:workflow] || payload["workflow"] ||
+                ENV["DALEMBERT_MODE"]
+  normalized_mode = raw_mode ? raw_mode.to_s.strip.downcase : nil
+  normalized_mode = nil if normalized_mode && normalized_mode.empty?
 
-  raw_mode    = payload[:mode] || payload["mode"] || ENV["DALEMBERT_MODE"]
+  raw_max_turns = payload[:max_turns] || payload["max_turns"] || ENV["MAX_TURNS"]
+  default_turns = if %w[swe_bench bug_hunter].include?(normalized_mode)
+                    Dalembert::Workflows::SweBenchWorkflow::DEFAULT_MAX_TURNS
+                  else
+                    30
+                  end
+  max_turns = raw_max_turns.to_i > 0 ? raw_max_turns.to_i : default_turns
 
+  has_cloud_tools = payload.key?(:cloud_tools) || payload.key?("cloud_tools")
   raw_cloud_tools = if payload.key?(:cloud_tools)
                       payload[:cloud_tools]
                     elsif payload.key?("cloud_tools")
@@ -105,61 +134,82 @@ def build_agent_for_session(payload = {})
                          payload["disabled_tools"]
                        end
 
-  Dalembert::Agent.new(
-    profile_name: raw_profile,
-    model: raw_model,
-    max_turns: max_turns,
-    mode: raw_mode,
-    cloud_tools: raw_cloud_tools,
-    disabled_tools: raw_disabled_tools
-  )
+  raw_system_prompt = payload[:system_prompt] || payload["system_prompt"]
+  system_prompt = raw_system_prompt && !raw_system_prompt.to_s.strip.empty? ? raw_system_prompt.to_s : nil
+
+  if %w[swe_bench bug_hunter].include?(normalized_mode)
+    effective_cloud_tools = (normalized_mode == "swe_bench" && !has_cloud_tools) ? [] : raw_cloud_tools
+    Dalembert::Workflows::SweBenchWorkflow.new(
+      profile_name: raw_profile,
+      model: raw_model,
+      cloud_tools: effective_cloud_tools,
+      disabled_tools: raw_disabled_tools,
+      system_prompt: system_prompt,
+      max_turns: max_turns
+    )
+  else
+    agent_opts = {
+      profile_name: raw_profile,
+      model: raw_model,
+      max_turns: max_turns,
+      mode: normalized_mode,
+      cloud_tools: raw_cloud_tools,
+      disabled_tools: raw_disabled_tools
+    }
+    agent_opts[:system_prompt] = system_prompt if system_prompt
+    Dalembert::Agent.new(**agent_opts)
+  end
 end
 
 module Dalembert
   module HubExtension
-    def create_agent(payload = {})
-      build_agent_for_session(payload)
-    end
-
-    def dispatch_session(payload = {}, *args, &block)
-      if payload.is_a?(Hash)
-        profile = payload[:llm_profile] || payload["llm_profile"] || "default"
-        model   = payload[:model] || payload["model"] || payload[:llm_model] || payload["llm_model"]
-        mode    = payload[:mode] || payload["mode"]
-        has_cloud_tools = payload.key?(:cloud_tools) || payload.key?("cloud_tools")
-        cloud_tools = payload.key?(:cloud_tools) ? payload[:cloud_tools] : payload["cloud_tools"]
-        has_disabled_tools = payload.key?(:disabled_tools) || payload.key?("disabled_tools")
-        disabled_tools = payload.key?(:disabled_tools) ? payload[:disabled_tools] : payload["disabled_tools"]
-
-        # Ensure normalized representation for downstream handlers
-        payload[:llm_profile] = profile
-        payload["llm_profile"] = profile
-        if model
-          payload[:model] = model
-          payload["model"] = model
-          payload[:llm_model] = model
-          payload["llm_model"] = model
-        end
-        if mode
-          payload[:mode] = mode
-          payload["mode"] = mode
-        end
-        if has_cloud_tools
-          payload[:cloud_tools] = cloud_tools
-          payload["cloud_tools"] = cloud_tools
-        end
-        if has_disabled_tools
-          payload[:disabled_tools] = disabled_tools
-          payload["disabled_tools"] = disabled_tools
-        end
+    module ServerPatch
+      def create_agent(payload = {})
+        build_agent_for_session(payload)
       end
-      defined?(super) ? super : nil
+
+      def dispatch_session(payload = {}, *args, &block)
+        if payload.is_a?(Hash)
+          profile = payload[:llm_profile] || payload["llm_profile"] || "default"
+          model   = payload[:model] || payload["model"] || payload[:llm_model] || payload["llm_model"]
+          mode    = payload[:mode] || payload["mode"] || payload[:workflow] || payload["workflow"]
+          has_cloud_tools = payload.key?(:cloud_tools) || payload.key?("cloud_tools")
+          cloud_tools = payload.key?(:cloud_tools) ? payload[:cloud_tools] : payload["cloud_tools"]
+          has_disabled_tools = payload.key?(:disabled_tools) || payload.key?("disabled_tools")
+          disabled_tools = payload.key?(:disabled_tools) ? payload[:disabled_tools] : payload["disabled_tools"]
+
+          # Ensure normalized representation for downstream handlers
+          payload[:llm_profile] = profile
+          payload["llm_profile"] = profile
+          if model
+            payload[:model] = model
+            payload["model"] = model
+            payload[:llm_model] = model
+            payload["llm_model"] = model
+          end
+          if mode
+            payload[:mode] = mode
+            payload["mode"] = mode
+          end
+          if has_cloud_tools
+            payload[:cloud_tools] = cloud_tools
+            payload["cloud_tools"] = cloud_tools
+          end
+          if has_disabled_tools
+            payload[:disabled_tools] = disabled_tools
+            payload["disabled_tools"] = disabled_tools
+          end
+        end
+        defined?(super) ? super : nil
+      end
     end
   end
 end
 
 if defined?(Descartes::Hub::Server)
-  Descartes::Hub::Server.prepend(Dalembert::HubExtension)
+  unless Descartes::Hub::Server.ancestors.include?(Dalembert::HubExtension::ServerPatch)
+    Descartes::Hub::Server.prepend(Dalembert::HubExtension::ServerPatch)
+  end
 end
 
 if defined?(Descartes::Hub) && Descartes::Hub.respond_to?(:agent_factory=)

@@ -27,6 +27,20 @@ Task ID: multi_provider_model_selection_001
 ================================================================================
 =end
 
+=begin
+================================================================================
+Test Suite: 12-Factor LLM_API_KEY Precedence Specifications
+Task ID: hub_session_swe_bench_routing_and_budget_005
+
+1. Problem / Feature Tested:
+   - Validates that when `ENV["LLM_BASE_URL"]` and `ENV["LLM_API_KEY"]` are set
+     in zero-config mode (`nil` / `"default"` profile) alongside `model: "hy4"`,
+     `ENV["LLM_API_KEY"]` takes precedence over `default.api_key` (`ENV["DEEPSEEK_API_KEY"]`).
+   - Validates fallback to `default.api_key` when `LLM_API_KEY` is blank/unset,
+     and confirms explicit profiles remain isolated from `LLM_BASE_URL` / `LLM_API_KEY`.
+================================================================================
+=end
+
 RSpec.describe Dalembert::ProfileResolver do
   let(:mock_config) do
     {
@@ -201,6 +215,36 @@ RSpec.describe Dalembert::ProfileResolver do
 
         res_default = described_class.resolve("default", config: mock_config)
         expect(res_default[:base_url]).to eq("http://internal-proxy:8080/v1")
+      end
+
+      it "gives ENV['LLM_API_KEY'] precedence over default.api_key when LLM_BASE_URL is active" do
+        ENV["LLM_API_KEY"] = "sk-railway-hy4"
+
+        res_nil = described_class.resolve(nil, model: "hy4", config: mock_config)
+        expect(res_nil[:base_url]).to eq("http://internal-proxy:8080/v1")
+        expect(res_nil[:api_key]).to eq("sk-railway-hy4")
+        expect(res_nil[:model]).to eq("hy4")
+
+        res_default = described_class.resolve("default", model: "hy4", config: mock_config)
+        expect(res_default[:base_url]).to eq("http://internal-proxy:8080/v1")
+        expect(res_default[:api_key]).to eq("sk-railway-hy4")
+        expect(res_default[:model]).to eq("hy4")
+      end
+
+      it "does not let ENV['LLM_API_KEY'] override an explicitly requested profile" do
+        ENV["LLM_API_KEY"] = "sk-railway-hy4"
+
+        res_deepseek = described_class.resolve("deepseek", config: mock_config)
+        expect(res_deepseek[:base_url]).to eq("https://api.deepseek.com/v1")
+        expect(res_deepseek[:api_key]).to eq("sk-deepseek-mock")
+      end
+
+      it "falls back to default.api_key when LLM_BASE_URL is active but LLM_API_KEY is blank" do
+        ENV["LLM_API_KEY"] = "   "
+
+        res_default = described_class.resolve("default", model: "hy4", config: mock_config)
+        expect(res_default[:base_url]).to eq("http://internal-proxy:8080/v1")
+        expect(res_default[:api_key]).to eq("sk-deepseek-mock")
       end
     end
 

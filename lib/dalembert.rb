@@ -39,6 +39,18 @@ Task ID: dynamic_tool_masking_and_swe_bench_workflow_003
 ================================================================================
 =end
 
+=begin
+================================================================================
+Feature: Hub Session Extension Loading
+Task ID: hub_session_swe_bench_routing_and_budget_005
+
+1. Problem / Feature Implemented:
+   - Registers `Dalembert::HubExtension` in the top-level `dalembert` load flow
+     so `Descartes::Hub::Session` receives Dalembert routing, tool masking, and
+     3-stage SWE-bench workflow support whenever `descartes/hub` is loaded.
+================================================================================
+=end
+
 require_relative "dalembert/version"
 require_relative "dalembert/profile_resolver"
 require_relative "dalembert/knowledge_store"
@@ -49,6 +61,7 @@ require_relative "dalembert/tools/spec_inspector"
 require_relative "dalembert/tools/knowledge_store_tool"
 require_relative "dalembert/agent"
 require_relative "dalembert/workflows/swe_bench_workflow"
+require_relative "dalembert/hub_extension"
 
 module Dalembert
 end
