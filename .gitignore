@@ -21,5 +21,6 @@ llm.local.yml
 benchmarks/swe_bench/.venv/
 benchmarks/swe_bench/runs/
 benchmarks/swe_bench/*.jsonl
-benchmarks/swe_bench/__pycache__/
+__pycache__/
+*.py[cod]
 *.bak*
