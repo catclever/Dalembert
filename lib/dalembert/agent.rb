@@ -1,5 +1,6 @@
 # frozen_string_literal: true
 
+require "timeout"
 require "descartes"
 require_relative "profile_resolver"
 require_relative "tools/github_repo_survey"
@@ -80,6 +81,31 @@ Task ID: dynamic_tool_masking_and_swe_bench_workflow_003
 ================================================================================
 =end
 
+=begin
+================================================================================
+Feature: Transient LLM Error Exponential Backoff Retry Wrapper
+Task ID: harden_swe_bench_retry_prompts_and_sandbox_isolation_011
+
+1. Problem / Feature Implemented:
+   - Upstream LLM endpoints (e.g. Hy4 / DeepSeek / OpenAI-compatible gateways)
+     periodically emit transient HTTP `429` rate-limit errors, `5xx` gateway errors,
+     or network read timeouts during multi-turn SWE-bench runs, previously causing
+     immediate stage failure on the first transient blip.
+
+2. Method / Logic Used:
+   - Keeps `@llm = RubyLLM::LLMService.new(**llm_init_opts)` so `agent.llm` remains
+     a true `RubyLLM::LLMService` instance.
+   - Installs `install_llm_retry_wrapper!(@llm)` on whichever invocation methods
+     (`call_with_system`, `call_with_messages`, `call`, `chat`) exist on `@llm`,
+     protected by a re-entrancy guard (`@_dalembert_in_retry_loop`) so internal
+     method delegation never multiplies retries.
+   - Retries transient errors matching `transient_llm_error?` up to `llm_max_retries`
+     with exponential backoff + jitter (or deterministic `llm_sleep_fn` in specs),
+     while re-raising non-transient errors (`401`, `400`, `ArgumentError`, etc.)
+     immediately on the first failure.
+================================================================================
+=end
+
 module Dalembert
   class Agent < Descartes::Agent::Base
     ALL_CLOUD_TOOLS = [
@@ -110,7 +136,14 @@ module Dalembert
 
     SWE_BENCH_MODES = %w[swe_bench bug_hunter].freeze
 
-    attr_reader :profile_name, :model, :resolved_profile, :llm, :mode, :enabled_tools
+    DEFAULT_LLM_MAX_RETRIES = 5
+    DEFAULT_LLM_RETRY_DELAYS = [2.0, 5.0, 12.0, 25.0, 45.0].freeze
+    LLM_RETRYABLE_METHODS = %i[call_with_system call_with_messages call chat].freeze
+    TRANSIENT_LLM_HTTP_STATUSES = [429, 500, 502, 503, 504, 520, 522, 524, 529].freeze
+    TRANSIENT_LLM_ERROR_PATTERN = /\b(429|500|502|503|504|520|522|524|529)\b|rate[\s_-]*limit|too many requests|timed?\s*out|timeout|connection reset|unexpected eof|temporarily unavailable|overloaded|bad gateway|service unavailable|gateway timeout/i
+
+    attr_reader :profile_name, :model, :resolved_profile, :llm, :mode, :enabled_tools,
+                :llm_max_retries, :llm_retry_delays
 
     class << self
       # Resolves the list of Dalembert cloud OSINT tools based on explicit whitelist,
@@ -165,6 +198,9 @@ module Dalembert
       cloud_tools: nil,
       disabled_tools: nil,
       mode: nil,
+      llm_max_retries: DEFAULT_LLM_MAX_RETRIES,
+      llm_retry_delays: DEFAULT_LLM_RETRY_DELAYS,
+      llm_sleep_fn: nil,
       **kwargs
     )
       normalized_mode = mode.nil? || mode.to_s.strip.empty? ? "default" : mode.to_s.strip.downcase
@@ -215,6 +251,10 @@ module Dalembert
       @model = resolved_config[:model]
       @mode = normalized_mode
       @enabled_tools = combined_tools
+      @llm_max_retries = llm_max_retries.nil? ? DEFAULT_LLM_MAX_RETRIES : [llm_max_retries.to_i, 0].max
+      @llm_retry_delays = Array(llm_retry_delays || DEFAULT_LLM_RETRY_DELAYS).map(&:to_f).freeze
+      @llm_sleep_fn = llm_sleep_fn
+      @logger = kwargs[:logger] if kwargs.key?(:logger) && (!defined?(@logger) || @logger.nil?)
 
       # Preserve Descartes default survival tools (e.g., send_message, write_working_note)
       # added by super while still respecting explicit disabled_tools exclusions.
@@ -236,9 +276,103 @@ module Dalembert
         llm_init_opts.delete(:profile_name)
       end
       @llm = RubyLLM::LLMService.new(**llm_init_opts)
+      install_llm_retry_wrapper!(@llm) unless @llm.nil? || @llm.frozen?
     end
 
     private
+
+    def install_llm_retry_wrapper!(llm)
+      return llm if llm.nil? || llm.frozen? || llm.instance_variable_defined?(:@_dalembert_retry_wrapped)
+
+      llm.instance_variable_set(:@_dalembert_retry_wrapped, true)
+      llm.instance_variable_set(:@_dalembert_in_retry_loop, false)
+
+      agent_ref = self
+      max_retries = @llm_max_retries
+      retry_delays = @llm_retry_delays
+      sleep_fn = @llm_sleep_fn
+
+      LLM_RETRYABLE_METHODS.each do |method_name|
+        next unless llm.respond_to?(method_name)
+
+        orig_method = begin
+          llm.method(method_name)
+        rescue NameError
+          nil
+        end
+        next unless orig_method
+
+        llm.define_singleton_method(method_name) do |*args, **kwargs, &block|
+          invoke_orig = lambda do
+            if kwargs.empty?
+              orig_method.call(*args, &block)
+            else
+              orig_method.call(*args, **kwargs, &block)
+            end
+          end
+
+          return invoke_orig.call if instance_variable_get(:@_dalembert_in_retry_loop)
+
+          instance_variable_set(:@_dalembert_in_retry_loop, true)
+          begin
+            attempts = 0
+            begin
+              invoke_orig.call
+            rescue StandardError, Timeout::Error => e
+              raise e unless agent_ref.send(:transient_llm_error?, e) && attempts < max_retries
+
+              attempts += 1
+              base_delay = if retry_delays.empty?
+                             2.0
+                           else
+                             retry_delays[[attempts - 1, retry_delays.length - 1].min].to_f
+                           end
+
+              logger_obj = agent_ref.instance_variable_defined?(:@logger) ? agent_ref.instance_variable_get(:@logger) : nil
+              logger_obj&.warn(
+                "[Dalembert::Agent] Transient LLM error in #{method_name} " \
+                "(retry #{attempts}/#{max_retries}, delay=#{base_delay}s): #{e.class}: #{e.message}"
+              )
+
+              if sleep_fn
+                sleep_fn.call(base_delay)
+              else
+                Kernel.sleep(base_delay + (Kernel.rand * 1.0))
+              end
+              retry
+            end
+          ensure
+            instance_variable_set(:@_dalembert_in_retry_loop, false)
+          end
+        end
+      end
+
+      llm
+    end
+
+    def transient_llm_error?(error, depth = 0)
+      return false if error.nil? || depth > 3
+      return true if error.is_a?(Timeout::Error) || error.is_a?(EOFError)
+      return true if defined?(Errno::ECONNRESET) && error.is_a?(Errno::ECONNRESET)
+      return true if defined?(Errno::ETIMEDOUT) && error.is_a?(Errno::ETIMEDOUT)
+      return true if defined?(Errno::ECONNREFUSED) && error.is_a?(Errno::ECONNREFUSED)
+
+      %i[status status_code http_status].each do |status_attr|
+        next unless error.respond_to?(status_attr)
+
+        code_val = error.public_send(status_attr)
+        return true if code_val && TRANSIENT_LLM_HTTP_STATUSES.include?(code_val.to_i)
+      end
+
+      combined_msg = "#{error.class}: #{error.message}"
+      return true if TRANSIENT_LLM_ERROR_PATTERN.match?(combined_msg)
+
+      if error.respond_to?(:cause) && error.cause && !error.cause.equal?(error)
+        return transient_llm_error?(error.cause, depth + 1)
+      end
+
+      false
+    end
 
     def default_system_prompt
       <<~PROMPT

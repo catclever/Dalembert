@@ -84,6 +84,29 @@ Task ID: hub_session_swe_bench_routing_and_budget_005
 ================================================================================
 =end
 
+=begin
+================================================================================
+Feature: Stage 1-3 Prompt Hardening (Anti-Revert, AST Edit Safety & Hygiene)
+Task ID: harden_swe_bench_retry_prompts_and_sandbox_isolation_011
+
+1. Problem / Feature Implemented:
+   - Post-baseline 12-repo audit revealed three recurring agent failure modes:
+     (a) passing multiline newlines or blocked git subcommands (`git show`,
+         `git stash`, `git grep`) to `run_verification`,
+     (b) passing class names or ambiguous dunder names (`__init__`, `__getstate__`,
+         `__setstate__`, `_setup`) to `replace_symbol` (wiping entire classes or
+         replacing the wrong class's method),
+     (c) temporarily reverting a working fix in Stage 3 to re-test Red Light or
+         running full-repository test sweeps until hitting the 540s timeout.
+
+2. Method / Logic Used:
+   - Hardened `stage_system_prompt` across `:locate`, `:reproduce`, and
+     `:patch_and_verify` with explicit anti-archaeology, single-line
+     `run_verification`, safe `replace_symbol` vs exact-file/surgical edit rules,
+     and strict anti-revert / anti-full-sweep immediate early-exit directives.
+================================================================================
+=end
+
 module Dalembert
   module Workflows
     class SweBenchWorkflow
@@ -500,6 +523,7 @@ module Dalembert
                                  Be fast and surgical (aim for 2-4 turns):
                                  - Scope `grep_search` to narrow subdirectories with `max_results <= 30`; avoid repo-wide scans of release notes, migrations, or large data fixtures.
                                  - Strictly use read-only inspection tools to locate the exact files, classes, functions, line ranges, and root cause hypothesis.
+                                 - Do NOT run git history archaeology; focus strictly on current working-tree source and test files.
                                  - As soon as the target implementation file(s) and relevant test file(s) are read and the root cause is clear, STOP exploring unrelated files and IMMEDIATELY call `send_message(key: "localization_report", value: "...")`.
                                  - Do NOT attempt to modify files or guess fixes without reading the source code.
                                PROMPT
@@ -508,6 +532,7 @@ module Dalembert
                                  You are operating in Stage 2 (:reproduce — Minimal Reproduction Verification) of the SWE-bench workflow.
                                  Be fast and surgical (aim for 1-3 turns):
                                  - Using the localization report from Stage 1, run ONE targeted test or minimal `python -c` command via `run_verification` to observe the failure (Red Light).
+                                 - Command rules for run_verification: pass single-line commands only (NEVER embed literal newlines inside python -c; use semicolons or single-line pytest invocations), and NEVER invoke blocked git subcommands (git show, git stash, git grep).
                                  - As soon as the failure is observed, IMMEDIATELY call `send_message(key: "reproduction_report", value: "...")`.
                                  - Do NOT modify application business logic or test files in this stage.
                                PROMPT
@@ -515,7 +540,9 @@ module Dalembert
                                <<~PROMPT
                                  You are operating in Stage 3 (:patch_and_verify — Surgical Patch & Regression Gate) of the SWE-bench workflow.
                                  Apply a minimal, surgical patch ONLY to the necessary production source file(s) addressing the root cause identified in Stage 1 (do NOT leave temporary scripts or conflicting edits in test files unless specifically required by the issue, so `git diff` stays clean).
-                                 Then run the reproduction check from Stage 2 and relevant regression tests via `run_verification` to confirm Green Light, verify `get_status`, and call `send_message(key: "patch_report", value: "...")`.
+                                 - `replace_symbol` matches by bare function/method name (first occurrence in file) and replaces the entire AST node. NEVER pass a class name to `replace_symbol` when updating a single method (it will wipe out the rest of the class), and do NOT use `replace_symbol` on common method names (`__init__`, `__getstate__`, `__setstate__`, `_setup`) in files with multiple classes — instead read the file and write exact contents or apply a surgical single-line `python -c` replacement, then immediately inspect `git diff -- <file>` to verify indentation and minimal diff.
+                                 - Pass single-line commands only to `run_verification` (no literal multiline newlines; no `git show`, `git stash`, or `git grep`). Delete any temporary reproduction scripts before finishing.
+                                 - CRITICAL ANTI-TIMEOUT RULE: Stage 2 ALREADY proved Red Light. NEVER temporarily revert your fix to re-test the unpatched baseline, and NEVER run slow full-repository test sweeps once the targeted test file/class passes! As soon as your minimal production patch passes the targeted reproduction + directly related test module and `git status` / `git diff` is clean, IMMEDIATELY call `send_message(key: "patch_report", value: "...")` and stop.
                                PROMPT
                              end
 
@@ -569,7 +596,7 @@ module Dalembert
           Stage 2 Reproduction Report (Red Light):
           #{reproduction_report}
 
-          Apply the minimal surgical fix and run the test suite to verify Green Light and zero regressions.
+          Apply the minimal surgical fix and run the targeted test module(s) to verify Green Light (do NOT revert your fix or run full-repo test sweeps).
           Submit your final Patch & Verification Report via send_message(key: "patch_report", value: "<report>").
         PROMPT
       end

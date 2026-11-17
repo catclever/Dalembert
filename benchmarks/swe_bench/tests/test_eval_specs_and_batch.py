@@ -11,6 +11,7 @@ import io
 import json
 import sys
 import tempfile
+import threading
 import unittest
 from pathlib import Path
 from typing import Any
@@ -479,7 +480,7 @@ class BatchSamplingDryRunAndExecutionTests(unittest.TestCase):
                 )
         return rows
 
-    def test_clamp_concurrency_enforces_1_to_3_bounds(self) -> None:
+    def test_clamp_concurrency_enforces_1_to_3_bounds_and_default_is_2(self) -> None:
         buf = io.StringIO()
         with contextlib.redirect_stderr(buf):
             self.assertEqual(modal_batch.clamp_concurrency(0), 1)
@@ -488,6 +489,15 @@ class BatchSamplingDryRunAndExecutionTests(unittest.TestCase):
             self.assertEqual(modal_batch.clamp_concurrency(8), 3)
         self.assertIn("clamping to 1", buf.getvalue())
         self.assertIn("clamping to 3", buf.getvalue())
+
+        batch_args = modal_batch.build_arg_parser().parse_args([])
+        self.assertEqual(batch_args.concurrency, 2)
+        self.assertEqual(batch_args.sandbox_timeout, 780)
+        self.assertEqual(batch_args.agent_timeout, 540)
+
+        canary_args = modal_canary.build_arg_parser().parse_args([])
+        self.assertEqual(canary_args.sandbox_timeout, 780)
+        self.assertEqual(canary_args.agent_timeout, 540)
 
     def test_stratified_selection_covers_all_12_repos_deterministically(self) -> None:
         dataset = self._build_12_repo_dataset(per_repo=3)
@@ -560,11 +570,14 @@ class BatchSamplingDryRunAndExecutionTests(unittest.TestCase):
     def test_batch_loop_resume_retry_errors_and_artifacts(self) -> None:
         dataset = self._build_12_repo_dataset(per_repo=1)[:3]
         calls: list[str] = []
+        calls_lock = threading.Lock()
 
         def fake_executor(instance: dict[str, Any], **kwargs: Any) -> dict[str, Any]:
             iid = instance["instance_id"]
-            calls.append(iid)
-            if iid == dataset[1]["instance_id"] and calls.count(iid) == 1:
+            with calls_lock:
+                calls.append(iid)
+                attempt_num = calls.count(iid)
+            if iid == dataset[1]["instance_id"] and attempt_num == 1:
                 raise RuntimeError("transient network glitch")
             is_resolved = iid != dataset[2]["instance_id"]
             return {
@@ -613,6 +626,7 @@ class BatchSamplingDryRunAndExecutionTests(unittest.TestCase):
                 billing_fetcher=billing_ok,
             )
             self.assertEqual(len(calls), 3)
+            self.assertCountEqual(calls[:3], [d["instance_id"] for d in dataset])
             self.assertEqual(sum1["completed_count"], 3)
             self.assertEqual(sum1["resolved_count"], 1)
             self.assertEqual(sum1["error_count"], 1)
@@ -641,7 +655,7 @@ class BatchSamplingDryRunAndExecutionTests(unittest.TestCase):
                 executor=fake_executor,
                 billing_fetcher=billing_ok,
             )
-            self.assertEqual(calls, [d["instance_id"] for d in dataset] + [dataset[1]["instance_id"]])
+            self.assertEqual(calls[3:], [dataset[1]["instance_id"]])
             self.assertEqual(sum3["resumed_count"], 2)
             self.assertEqual(sum3["executed_count"], 1)
             self.assertEqual(sum3["resolved_count"], 2)
@@ -663,6 +677,40 @@ class BatchSamplingDryRunAndExecutionTests(unittest.TestCase):
             self.assertIn("## Billing Guardrail Status", report_md)
             self.assertIn("## Per-Repository Pass@1", report_md)
             self.assertIn("## Per-Instance Results", report_md)
+
+    def test_staggered_dispatch_applies_between_concurrent_workers(self) -> None:
+        dataset = self._build_12_repo_dataset(per_repo=1)[:3]
+        recorded_sleeps: list[float] = []
+
+        def fake_executor(instance: dict[str, Any], **kwargs: Any) -> dict[str, Any]:
+            return {
+                "instance_id": instance["instance_id"],
+                "repo": instance["repo"],
+                "model_patch": "diff --git a/a.py b/a.py\n",
+                "solver_rc": 0,
+                "solver_elapsed_sec": 1.0,
+                "audit": {"phases_seen": ["locate"], "cloud_osint_hits": [], "cloud_osint_count": 0},
+                "eval_summary": {"evaluated": True, "resolved": True},
+                "resolved": True,
+                "error": None,
+            }
+
+        billing_ok = lambda: "Metered Cost: $0.10\nCredits: -$0.10\nBilled Cost: $0.00"
+
+        with tempfile.TemporaryDirectory() as tmp:
+            summary = modal_batch.run_batch(
+                dataset,
+                batch_dir=Path(tmp) / "stagger_batch",
+                batch_name="stagger_batch",
+                concurrency=2,
+                dispatch_stagger_sec=1.5,
+                sleep_fn=recorded_sleeps.append,
+                executor=fake_executor,
+                billing_fetcher=billing_ok,
+            )
+            self.assertEqual(summary["completed_count"], 3)
+            # First dispatch has 0 wait; dispatches #2 and #3 stagger by 1.5s each!
+            self.assertEqual(recorded_sleeps, [1.5, 1.5])
 
     def test_batch_circuit_breaker_halts_mid_batch_when_budget_exceeded(self) -> None:
         dataset = self._build_12_repo_dataset(per_repo=1)[:3]
@@ -724,22 +772,24 @@ class ModalCanaryMultiRepoExecutionTests(unittest.TestCase):
         proc.wait.return_value = rc
         return proc
 
-    def test_execute_instance_runs_pytest_repo_and_terminates_both_sandboxes(self) -> None:
+    def test_execute_instance_normalizes_baseline_enforces_headroom_and_isolates_eval_network(self) -> None:
         solver_sb = mock.MagicMock()
         solver_sb.exec.side_effect = [
             # 1. enginedge --version
             self._make_fake_proc("enginedge 0.4.0\n", "", 0),
-            # 2. write_remote_b64_file(/tmp/problem_statement.txt)
+            # 2. normalize_solver_git_baseline
             self._make_fake_proc("", "", 0),
-            # 3. solve_script
+            # 3. write_remote_b64_file(/tmp/problem_statement.txt)
+            self._make_fake_proc("", "", 0),
+            # 4. solve_script
             self._make_fake_proc(
                 "Phase 1/3 [:locate]\nPhase 2/3 [:reproduce]\nPhase 3/3 [:patch_and_verify]\n",
                 "",
                 0,
             ),
-            # 4. git diff
+            # 5. git diff
             self._make_fake_proc("diff --git a/requests/models.py b/requests/models.py\n+fix\n", "", 0),
-            # 5. git status --short
+            # 6. git status --short
             self._make_fake_proc(" M requests/models.py\n", "", 0),
         ]
 
@@ -761,6 +811,7 @@ class ModalCanaryMultiRepoExecutionTests(unittest.TestCase):
 
         fake_modal = mock.MagicMock()
         fake_modal.Sandbox.create.return_value = eval_sb
+        base_img_mock = mock.MagicMock()
 
         instance = {
             "instance_id": "psf__requests-2148",
@@ -783,8 +834,12 @@ class ModalCanaryMultiRepoExecutionTests(unittest.TestCase):
                 mock.patch.object(
                     modal_canary,
                     "create_solver_sandbox",
-                    return_value=(solver_sb, "ghcr.io/epoch-research/swe-bench.eval.x86_64.psf__requests-2148:latest", mock.MagicMock()),
-                ),
+                    return_value=(
+                        solver_sb,
+                        "ghcr.io/epoch-research/swe-bench.eval.x86_64.psf__requests-2148:latest",
+                        base_img_mock,
+                    ),
+                ) as create_solver_mock,
             ):
                 res = modal_canary.execute_instance(
                     instance,
@@ -800,6 +855,30 @@ class ModalCanaryMultiRepoExecutionTests(unittest.TestCase):
                     run_dir=run_dir,
                 )
 
+            # Verify effective_sandbox_timeout >= agent_timeout + 180 (720 when 540 & 600)
+            self.assertEqual(
+                create_solver_mock.call_args.kwargs["sandbox_timeout"],
+                720,
+            )
+
+            # Verify normalize_solver_git_baseline ran at exec #2 BEFORE writing problem_statement (#3) and enginedge (#4)
+            solver_exec_calls = solver_sb.exec.call_args_list
+            self.assertEqual(solver_exec_calls[0].args, ("/usr/local/bin/enginedge", "--version"))
+            baseline_cmd = solver_exec_calls[1].args[2]
+            self.assertIn("container-env-baseline", baseline_cmd)
+            self.assertIn("git for-each-ref", baseline_cmd)
+            self.assertIn("git reflog expire --expire=now --all", baseline_cmd)
+            self.assertIn("git gc --prune=now --quiet", baseline_cmd)
+            self.assertIn("/tmp/problem_statement.txt", solver_exec_calls[2].args[2])
+            self.assertIn("/usr/local/bin/enginedge --mode eval", solver_exec_calls[3].args[2])
+            self.assertEqual(solver_exec_calls[3].kwargs["timeout"], 600)
+
+            # Verify eval_sb uses block_network=True and preserves container baseline (no git checkout -f)
+            self.assertTrue(fake_modal.Sandbox.create.call_args.kwargs["block_network"])
+            eval_script_arg = eval_sb.exec.call_args_list[2].args[2]
+            self.assertNotIn("git checkout -f", eval_script_arg)
+            self.assertIn("git clean -fd", eval_script_arg)
+
             solver_sb.terminate.assert_called_once()
             eval_sb.terminate.assert_called_once()
             self.assertEqual(res["repo"], "psf/requests")
@@ -808,6 +887,169 @@ class ModalCanaryMultiRepoExecutionTests(unittest.TestCase):
             self.assertEqual(res["audit"]["cloud_osint_count"], 0)
             self.assertTrue((run_dir / "model.patch").is_file())
             self.assertTrue((run_dir / "eval_output.log").is_file())
+
+    def test_execute_instance_salvages_patch_and_evaluates_when_solver_times_out(self) -> None:
+        timeout_proc = mock.MagicMock()
+        timeout_proc.stdout = io.StringIO("Phase 1/3 [:locate]\nPhase 3/3 [:patch_and_verify]\n")
+        timeout_proc.stderr = io.StringIO("")
+        timeout_proc.wait.side_effect = TimeoutError("Solver process timed out at 600s")
+
+        salvaged_diff = (
+            "diff --git a/xarray/core/merge.py b/xarray/core/merge.py\n"
+            "--- a/xarray/core/merge.py\n"
+            "+++ b/xarray/core/merge.py\n"
+            "@@ -10,1 +10,1 @@\n"
+            "-attrs = dict(first.attrs)\n"
+            "+attrs = first.attrs.copy()\n"
+        )
+
+        solver_sb = mock.MagicMock()
+        solver_sb.exec.side_effect = [
+            # 1. enginedge --version
+            self._make_fake_proc("enginedge 0.4.0\n", "", 0),
+            # 2. normalize_solver_git_baseline
+            self._make_fake_proc("", "", 0),
+            # 3. write_remote_b64_file(/tmp/problem_statement.txt)
+            self._make_fake_proc("", "", 0),
+            # 4. solve_script -> times out inside wait()!
+            timeout_proc,
+            # 5. git diff STILL runs and harvests patch!
+            self._make_fake_proc(salvaged_diff, "", 0),
+            # 6. git status --short
+            self._make_fake_proc(" M xarray/core/merge.py\n", "", 0),
+        ]
+
+        eval_sb = mock.MagicMock()
+        eval_sb.exec.side_effect = [
+            self._make_fake_proc("", "", 0),
+            self._make_fake_proc("", "", 0),
+            self._make_fake_proc(
+                "=========================== short test summary info ============================\n"
+                "PASSED xarray/tests/test_merge.py::test_merge_combine_attrs_override_copy\n",
+                "",
+                0,
+            ),
+        ]
+
+        fake_modal = mock.MagicMock()
+        fake_modal.Sandbox.create.return_value = eval_sb
+
+        instance = {
+            "instance_id": "pydata__xarray-4629",
+            "base_commit": "a41edc7f",
+            "problem_statement": "merge(combine_attrs='override') references attrs instead of copying",
+            "test_patch": (
+                "diff --git a/xarray/tests/test_merge.py b/xarray/tests/test_merge.py\n"
+                "--- a/xarray/tests/test_merge.py\n"
+                "+++ b/xarray/tests/test_merge.py\n"
+                "@@ -1 +1,2 @@\n"
+            ),
+            "FAIL_TO_PASS": ["xarray/tests/test_merge.py::test_merge_combine_attrs_override_copy"],
+            "PASS_TO_PASS": [],
+        }
+
+        with tempfile.TemporaryDirectory() as tmp:
+            run_dir = Path(tmp) / "pydata__xarray-4629"
+            with (
+                mock.patch.object(modal_canary, "_import_modal", return_value=fake_modal),
+                mock.patch.object(
+                    modal_canary,
+                    "create_solver_sandbox",
+                    return_value=(
+                        solver_sb,
+                        "ghcr.io/epoch-research/swe-bench.eval.x86_64.pydata__xarray-4629:latest",
+                        mock.MagicMock(),
+                    ),
+                ),
+            ):
+                res = modal_canary.execute_instance(
+                    instance,
+                    app=mock.MagicMock(),
+                    enginedge_bin="/bin/true",
+                    ws_url="wss://example.invalid",
+                    auth_token="secret",
+                    profile="default",
+                    model="hy4",
+                    max_turns=45,
+                    agent_timeout=540,
+                    sandbox_timeout=780,
+                    run_dir=run_dir,
+                )
+
+            self.assertEqual(res["solver_rc"], 124)
+            self.assertEqual(res["model_patch"], salvaged_diff)
+            self.assertGreater(res["patch_bytes"], 0)
+            self.assertTrue(res["eval_summary"]["evaluated"])
+            self.assertTrue(res["resolved"])
+            self.assertEqual(res["audit"]["phases_seen"], ["locate", "patch_and_verify"])
+            solver_sb.terminate.assert_called_once()
+            eval_sb.terminate.assert_called_once()
+
+    def test_execute_instance_records_structured_eval_timeout_without_crashing(self) -> None:
+        solver_sb = mock.MagicMock()
+        solver_sb.exec.side_effect = [
+            self._make_fake_proc("enginedge 0.4.0\n", "", 0),
+            self._make_fake_proc("", "", 0),
+            self._make_fake_proc("", "", 0),
+            self._make_fake_proc("Phase 1/3 [:locate]\n", "", 0),
+            self._make_fake_proc("diff --git a/requests/api.py b/requests/api.py\n+x\n", "", 0),
+            self._make_fake_proc(" M requests/api.py\n", "", 0),
+        ]
+
+        eval_timeout_proc = mock.MagicMock()
+        eval_timeout_proc.stdout = io.StringIO("collecting ...\n")
+        eval_timeout_proc.stderr = io.StringIO("")
+        eval_timeout_proc.wait.side_effect = TimeoutError()
+
+        eval_sb = mock.MagicMock()
+        eval_sb.exec.side_effect = [
+            self._make_fake_proc("", "", 0),
+            self._make_fake_proc("", "", 0),
+            eval_timeout_proc,
+        ]
+
+        fake_modal = mock.MagicMock()
+        fake_modal.Sandbox.create.return_value = eval_sb
+
+        instance = {
+            "instance_id": "psf__requests-1921",
+            "base_commit": "123456",
+            "problem_statement": "Header None handling",
+            "test_patch": "diff --git a/tests/test_requests.py b/tests/test_requests.py\n--- a/tests/test_requests.py\n+++ b/tests/test_requests.py\n@@ -1 +1,2 @@\n",
+            "FAIL_TO_PASS": ["tests/test_requests.py::test_none_header"],
+            "PASS_TO_PASS": [],
+        }
+
+        with tempfile.TemporaryDirectory() as tmp:
+            run_dir = Path(tmp) / "psf__requests-1921"
+            with (
+                mock.patch.object(modal_canary, "_import_modal", return_value=fake_modal),
+                mock.patch.object(
+                    modal_canary,
+                    "create_solver_sandbox",
+                    return_value=(solver_sb, "img:latest", mock.MagicMock()),
+                ),
+            ):
+                res = modal_canary.execute_instance(
+                    instance,
+                    app=mock.MagicMock(),
+                    enginedge_bin="/bin/true",
+                    ws_url="wss://example.invalid",
+                    auth_token="secret",
+                    profile="default",
+                    model="hy4",
+                    max_turns=45,
+                    agent_timeout=540,
+                    sandbox_timeout=780,
+                    run_dir=run_dir,
+                )
+
+            self.assertIsNone(res["error"])
+            self.assertTrue(res["eval_summary"]["evaluated"])
+            self.assertEqual(res["eval_summary"]["exit_code"], 124)
+            self.assertFalse(res["eval_summary"]["resolved"])
+            self.assertIn("TimeoutError", res["eval_summary"]["eval_error"])
+            eval_sb.terminate.assert_called_once()
 
 
 if __name__ == "__main__":

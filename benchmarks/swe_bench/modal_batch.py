@@ -6,7 +6,8 @@ Features:
   - Supports all 12 SWE-bench_Verified Python repositories via `eval_specs`.
   - Loads `.parquet` (lazy `pyarrow`) as well as offline `.json` / `.jsonl` fixtures.
   - Deterministic `--stratified` + `--seed` round-robin sampling across repositories.
-  - Hard-clamped `--concurrency` (1..3), checkpoint `--resume` / `--retry-errors`.
+  - Hard-clamped `--concurrency` (default 2, clamped 1..3) with staggered dispatch,
+    checkpoint `--resume` / `--retry-errors`.
   - Modal Billing Circuit Breaker (`--max-budget-usd`, zero-billed-cost enforcement).
   - Incremental `predictions.jsonl`, `batch_summary.json`, and `REPORT.md` generation.
 """
@@ -62,6 +63,8 @@ except ImportError:
 
 MIN_CONCURRENCY = 1
 MAX_CONCURRENCY = 3
+DEFAULT_CONCURRENCY = 2
+DEFAULT_DISPATCH_STAGGER_SEC = 1.5
 
 _CURRENCY_NUMBER_PATTERN = r"([+-]?\s*\$?\s*[+-]?\d[\d,]*(?:\.\d+)?)"
 _METERED_COST_RE = re.compile(
@@ -349,7 +352,8 @@ def should_skip_instance(
     except (OSError, json.JSONDecodeError):
         return False, None
 
-    has_error = bool(cached.get("error")) or cached.get("solver_rc", -1) != 0
+    is_resolved = bool(cached.get("resolved") or (cached.get("eval_summary") or {}).get("resolved"))
+    has_error = bool(cached.get("error")) or (cached.get("solver_rc", -1) != 0 and not is_resolved)
     if retry_errors and has_error:
         return False, cached
     return True, cached
@@ -449,7 +453,13 @@ def _build_batch_summary_dict(
         1 for s in ordered_completed if bool((s.get("eval_summary") or {}).get("evaluated"))
     )
     error_count = sum(
-        1 for s in ordered_completed if bool(s.get("error")) or s.get("solver_rc", 0) != 0
+        1
+        for s in ordered_completed
+        if bool(s.get("error"))
+        or (
+            s.get("solver_rc", 0) != 0
+            and not bool(s.get("resolved") or (s.get("eval_summary") or {}).get("resolved"))
+        )
     )
 
     per_repo: dict[str, dict[str, Any]] = {}
@@ -465,7 +475,7 @@ def _build_batch_summary_dict(
         eval_sum = summary.get("eval_summary") or {}
         is_eval = bool(eval_sum.get("evaluated"))
         is_res = bool(summary.get("resolved") or eval_sum.get("resolved"))
-        is_err = bool(summary.get("error")) or summary.get("solver_rc", 0) != 0
+        is_err = bool(summary.get("error")) or (summary.get("solver_rc", 0) != 0 and not is_res)
         if is_eval:
             bucket["evaluated"] += 1
         if is_res:
@@ -688,8 +698,8 @@ def run_batch(
     model: str = "hy4",
     max_turns: int = 45,
     agent_timeout: int = 540,
-    sandbox_timeout: int = 600,
-    concurrency: int = 1,
+    sandbox_timeout: int = 780,
+    concurrency: int = DEFAULT_CONCURRENCY,
     resume: bool = True,
     retry_errors: bool = False,
     max_budget_usd: float = 5.0,
@@ -700,15 +710,24 @@ def run_batch(
     app: Any = None,
     executor: Callable[..., dict[str, Any]] | None = None,
     billing_fetcher: Callable[[], str] | None = None,
+    dispatch_stagger_sec: float | None = None,
+    sleep_fn: Callable[[float], None] = time.sleep,
 ) -> dict[str, Any]:
     """
     Run a batch of SWE-bench instances with checkpoint resume, bounded concurrency,
-    Modal billing circuit breaker, and incremental artifact generation.
+    staggered dispatch, Modal billing circuit breaker, and incremental artifact generation.
     """
     effective_concurrency = clamp_concurrency(concurrency)
     inst_executor = executor or execute_instance
     bill_fn = billing_fetcher or (lambda: run_billing_summary(modal_bin))
     breaker = BillingCircuitBreaker(max_budget_usd=max_budget_usd, billing_fetcher=bill_fn)
+
+    if dispatch_stagger_sec is None:
+        effective_stagger_sec = (
+            0.0 if executor is not None else DEFAULT_DISPATCH_STAGGER_SEC
+        )
+    else:
+        effective_stagger_sec = max(0.0, float(dispatch_stagger_sec))
 
     t_start = time.time()
     batch_dir.mkdir(parents=True, exist_ok=True)
@@ -755,6 +774,9 @@ def run_batch(
 
     checkpoint_lock = threading.Lock()
     dispatch_gate_lock = threading.Lock()
+    pending_iter = iter(pending_instances)
+    dispatched_count = 0
+    last_dispatch_mono: float | None = None
 
     # Write initial checkpoint state (reflecting any resumed instances)
     _write_batch_artifacts(
@@ -769,22 +791,10 @@ def run_batch(
         billing_state=breaker.to_dict(),
     )
 
-    def _run_single(inst: dict[str, Any]) -> None:
+    def _execute_and_checkpoint(inst: dict[str, Any]) -> None:
         iid = str(inst["instance_id"])
         repo = eval_specs.infer_repo(inst)
         inst_dir = instances_root / iid
-
-        with dispatch_gate_lock:
-            if breaker.tripped:
-                return
-            breaker.check(f"pre-dispatch:{iid}")
-            if breaker.tripped:
-                print(
-                    f"[CircuitBreaker] HALTING before dispatch of {iid}: {breaker.reason}",
-                    file=sys.stderr,
-                )
-                return
-
         inst_dir.mkdir(parents=True, exist_ok=True)
         t_inst = time.time()
         try:
@@ -869,17 +879,54 @@ def run_batch(
                 billing_state=breaker.to_dict(),
             )
 
+    def _worker_loop() -> None:
+        nonlocal dispatched_count, last_dispatch_mono
+        while True:
+            with dispatch_gate_lock:
+                if breaker.tripped:
+                    return
+                try:
+                    inst = next(pending_iter)
+                except StopIteration:
+                    return
+
+                iid = str(inst["instance_id"])
+                if (
+                    dispatched_count > 0
+                    and effective_concurrency > 1
+                    and effective_stagger_sec > 0.0
+                ):
+                    if sleep_fn is time.sleep and last_dispatch_mono is not None:
+                        wait_rem = effective_stagger_sec - (time.monotonic() - last_dispatch_mono)
+                        if wait_rem > 0.0:
+                            sleep_fn(wait_rem)
+                    else:
+                        sleep_fn(effective_stagger_sec)
+
+                if breaker.tripped:
+                    return
+                breaker.check(f"pre-dispatch:{iid}")
+                if breaker.tripped:
+                    print(
+                        f"[CircuitBreaker] HALTING before dispatch of {iid}: {breaker.reason}",
+                        file=sys.stderr,
+                    )
+                    return
+
+                dispatched_count += 1
+                last_dispatch_mono = time.monotonic()
+
+            _execute_and_checkpoint(inst)
+
     if pending_instances:
         if effective_concurrency == 1:
-            for inst in pending_instances:
-                if breaker.tripped:
-                    break
-                _run_single(inst)
+            _worker_loop()
         else:
+            worker_count = min(effective_concurrency, len(pending_instances))
             with concurrent.futures.ThreadPoolExecutor(
-                max_workers=effective_concurrency
+                max_workers=worker_count
             ) as pool:
-                futures = [pool.submit(_run_single, inst) for inst in pending_instances]
+                futures = [pool.submit(_worker_loop) for _ in range(worker_count)]
                 for fut in concurrent.futures.as_completed(futures):
                     fut.result()
 
@@ -943,8 +990,8 @@ def build_arg_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--concurrency",
         type=int,
-        default=1,
-        help="Concurrent Modal Sandboxes, hard-clamped to 1..3 (default: 1)",
+        default=DEFAULT_CONCURRENCY,
+        help="Concurrent Modal Sandboxes, hard-clamped to 1..3 (default: 2)",
     )
     parser.add_argument(
         "--resume",
@@ -956,7 +1003,7 @@ def build_arg_parser() -> argparse.ArgumentParser:
         "--retry-errors",
         action="store_true",
         default=False,
-        help="When --resume is active, re-run instances with error or solver_rc != 0",
+        help="When --resume is active, re-run instances with error or unresolved solver_rc != 0",
     )
     parser.add_argument(
         "--max-budget-usd",
@@ -974,7 +1021,7 @@ def build_arg_parser() -> argparse.ArgumentParser:
     parser.add_argument("--model", default="hy4")
     parser.add_argument("--max-turns", type=int, default=45)
     parser.add_argument("--agent-timeout", type=int, default=540)
-    parser.add_argument("--sandbox-timeout", type=int, default=600)
+    parser.add_argument("--sandbox-timeout", type=int, default=780)
     parser.add_argument("--ws-url", default=os.environ.get("DALEMBERT_WS_URL", DEFAULT_WS_URL))
     parser.add_argument("--enginedge-bin", default=DEFAULT_ENGINEDGE_BIN)
     parser.add_argument("--modal-bin", default=DEFAULT_MODAL_BIN)

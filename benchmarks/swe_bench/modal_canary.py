@@ -18,6 +18,7 @@ import base64
 import json
 import os
 import re
+import shlex
 import subprocess
 import sys
 import threading
@@ -155,15 +156,24 @@ def candidate_images_for(instance_id: str) -> list[str]:
     ]
 
 
-def stream_process_output(proc: Any, tag: str = "") -> tuple[int, str, str]:
-    stdout_chunks: list[str] = []
-    stderr_chunks: list[str] = []
+def stream_process_output(
+    proc: Any,
+    tag: str = "",
+    *,
+    stdout_sink: list[str] | None = None,
+    stderr_sink: list[str] | None = None,
+) -> tuple[int, str, str]:
+    stdout_chunks = stdout_sink if stdout_sink is not None else []
+    stderr_chunks = stderr_sink if stderr_sink is not None else []
     tag_prefix = f"[{tag}] " if tag else ""
 
     def reader(pipe: Any, chunks: list[str], stream_label: str) -> None:
-        for line in pipe:
-            chunks.append(line)
-            print(f"{tag_prefix}{stream_label}{line}", end="", flush=True)
+        try:
+            for line in pipe:
+                chunks.append(line)
+                print(f"{tag_prefix}{stream_label}{line}", end="", flush=True)
+        except Exception:
+            pass
 
     t_out = threading.Thread(
         target=reader, args=(proc.stdout, stdout_chunks, "[OUT] "), daemon=True
@@ -173,9 +183,11 @@ def stream_process_output(proc: Any, tag: str = "") -> tuple[int, str, str]:
     )
     t_out.start()
     t_err.start()
-    proc.wait()
-    t_out.join(timeout=5)
-    t_err.join(timeout=5)
+    try:
+        proc.wait()
+    finally:
+        t_out.join(timeout=5)
+        t_err.join(timeout=5)
     return proc.returncode, "".join(stdout_chunks), "".join(stderr_chunks)
 
 
@@ -217,6 +229,50 @@ def write_remote_b64_file(sb: Any, remote_path: str, content: str) -> None:
     proc.wait()
     if proc.returncode != 0:
         raise RuntimeError(f"Failed writing {remote_path} (rc={proc.returncode}): {out}\n{err}")
+
+
+def normalize_solver_git_baseline(
+    sb: Any,
+    base_commit: str,
+    instance_id: str = "",
+) -> None:
+    """
+    Normalize `/testbed` git state before launching the solver so:
+      1. Container offline tweaks (`tox.ini`, `setup.py`) are committed cleanly onto
+         detached HEAD, leaving `git status` and `git diff` 100% clean.
+      2. Remotes, branches, tags, reflogs, and unreachable future git commits are
+         scrubbed via `git gc --prune=now` to eliminate temporal leakage.
+    """
+    quoted_commit = shlex.quote((base_commit or "").strip())
+    baseline_script = (
+        f'export PATH="{CONTAINER_ENV_PATH}"\n'
+        "cd /testbed\n"
+        'git config user.email "swe-bench@local" && git config user.name "swe-bench"\n'
+        f"BASE_COMMIT={quoted_commit}\n"
+        'HEAD_SHA="$(git rev-parse HEAD 2>/dev/null || true)"\n'
+        'if [ -n "$BASE_COMMIT" ] && [ -n "$HEAD_SHA" ] && [ "$HEAD_SHA" != "$BASE_COMMIT" ] '
+        '&& [ -z "$(git status --porcelain --untracked-files=no 2>/dev/null || true)" ]; then\n'
+        '  git checkout --detach -q "$BASE_COMMIT" 2>/dev/null || git checkout --detach -q 2>/dev/null || true\n'
+        "else\n"
+        "  git checkout --detach -q 2>/dev/null || true\n"
+        "fi\n"
+        'git add -u && (git diff --cached --quiet || git commit -q --no-verify -m "container-env-baseline")\n'
+        "git clean -fd\n"
+        'for r in $(git remote 2>/dev/null || true); do git remote remove "$r" 2>/dev/null || true; done\n'
+        "git for-each-ref --format='%(refname)' refs/heads/ refs/remotes/ refs/tags/ 2>/dev/null | while read -r ref; do\n"
+        '  [ -n "$ref" ] && git update-ref -d "$ref" 2>/dev/null || true\n'
+        "done\n"
+        "git reflog expire --expire=now --all 2>/dev/null || true\n"
+        "git gc --prune=now --quiet 2>/dev/null || true\n"
+    )
+    label = f":{instance_id}" if instance_id else ""
+    proc = sb.exec("sh", "-c", baseline_script, timeout=90)
+    out = proc.stdout.read()
+    err = proc.stderr.read()
+    proc.wait()
+    print(f"[Baseline{label}] Normalized solver git baseline & scrubbed history (rc={proc.returncode})")
+    if proc.returncode != 0 and (out.strip() or err.strip()):
+        print(f"[Baseline{label}] Diagnostics: {(out + err).strip()}")
 
 
 def extract_django_test_modules(test_names: list[str]) -> list[str]:
@@ -333,6 +389,9 @@ def execute_instance(
         version=version,
     )
 
+    effective_sandbox_timeout = max(int(sandbox_timeout), int(agent_timeout) + 180)
+    solve_exec_timeout = int(agent_timeout) + 60
+
     model_patch = ""
     solver_rc = -1
     solver_stdout = ""
@@ -340,7 +399,7 @@ def execute_instance(
 
     print(
         f"\n[Solver:{instance_id}] Launching Solver Modal Sandbox "
-        f"(repo={repo}, timeout={sandbox_timeout}s, cpu=2.0, memory=4096MB)"
+        f"(repo={repo}, timeout={effective_sandbox_timeout}s, cpu=2.0, memory=4096MB)"
     )
     t0 = time.time()
     sb, used_image_tag, base_image = create_solver_sandbox(
@@ -349,7 +408,7 @@ def execute_instance(
         enginedge_bin=enginedge_bin,
         ws_url=ws_url,
         auth_token=auth_token,
-        sandbox_timeout=sandbox_timeout,
+        sandbox_timeout=effective_sandbox_timeout,
     )
     try:
         ver_proc = sb.exec("/usr/local/bin/enginedge", "--version")
@@ -373,6 +432,7 @@ def execute_instance(
                 f"enginedge --version failed inside {used_image_tag} (rc={ver_proc.returncode})"
             )
 
+        normalize_solver_git_baseline(sb, base_commit, instance_id=instance_id)
         write_remote_b64_file(sb, "/tmp/problem_statement.txt", problem_statement)
 
         solve_script = (
@@ -391,10 +451,30 @@ def execute_instance(
         )
         print(
             f"[Solver:{instance_id}] Running enginedge "
-            f"(profile={profile}, model={model}, max_turns={max_turns}, timeout={agent_timeout}s)..."
+            f"(profile={profile}, model={model}, max_turns={max_turns}, "
+            f"timeout={agent_timeout}s, exec_timeout={solve_exec_timeout}s)..."
         )
-        solve_proc = sb.exec("sh", "-c", solve_script, timeout=sandbox_timeout)
-        solver_rc, solver_stdout, solver_stderr = stream_process_output(solve_proc, tag=instance_id)
+        solver_out_sink: list[str] = []
+        solver_err_sink: list[str] = []
+        try:
+            solve_proc = sb.exec("sh", "-c", solve_script, timeout=solve_exec_timeout)
+            solver_rc, solver_stdout, solver_stderr = stream_process_output(
+                solve_proc,
+                tag=instance_id,
+                stdout_sink=solver_out_sink,
+                stderr_sink=solver_err_sink,
+            )
+        except Exception as solve_exc:
+            print(
+                f"[Solver:{instance_id}] Solver exec interrupted/timed out: {solve_exc}",
+                file=sys.stderr,
+            )
+            solver_rc = 124
+            solver_stdout = "".join(solver_out_sink)
+            solver_stderr = (
+                "".join(solver_err_sink)
+                + f"\n[Solver:{instance_id}] Solver exec interrupted/timed out: {solve_exc!r}\n"
+            )
 
         diff_proc = sb.exec("git", "-C", "/testbed", "diff")
         model_patch = diff_proc.stdout.read()
@@ -436,7 +516,7 @@ def execute_instance(
     if model_patch.strip():
         print(
             f"\n[Eval:{instance_id}] Launching Clean Official Evaluation Sandbox "
-            "(timeout=300s, cpu=2.0, memory=4096MB)"
+            "(timeout=300s, cpu=2.0, memory=4096MB, block_network=True)"
         )
         t_eval = time.time()
         eval_sb = modal.Sandbox.create(
@@ -446,6 +526,7 @@ def execute_instance(
             timeout=300,
             cpu=2.0,
             memory=4096,
+            block_network=True,
             env={"PATH": CONTAINER_ENV_PATH},
         )
         try:
@@ -455,28 +536,57 @@ def execute_instance(
             eval_script = (
                 "set -e\n"
                 f'export PATH="{CONTAINER_ENV_PATH}"\n'
-                f"git checkout -f {base_commit}\n"
                 "git clean -fd\n"
                 "git apply --verbose /tmp/model.patch || git apply --3way /tmp/model.patch || patch --batch --fuzz=5 -p1 -i /tmp/model.patch\n"
                 "git apply --verbose /tmp/test.patch || git apply --3way /tmp/test.patch || patch --batch --fuzz=5 -p1 -i /tmp/test.patch\n"
                 "set +e\n"
                 f"{eval_cmd}\n"
             )
-            eval_proc = eval_sb.exec("sh", "-c", eval_script, timeout=280)
-            eval_rc, eval_out, eval_err = stream_process_output(eval_proc, tag=f"eval:{instance_id}")
-            combined_eval = f"{eval_out}\n{eval_err}"
-            (run_dir / "eval_output.log").write_text(combined_eval, encoding="utf-8")
+            eval_out_sink: list[str] = []
+            eval_err_sink: list[str] = []
+            try:
+                eval_proc = eval_sb.exec("sh", "-c", eval_script, timeout=280)
+                eval_rc, eval_out, eval_err = stream_process_output(
+                    eval_proc,
+                    tag=f"eval:{instance_id}",
+                    stdout_sink=eval_out_sink,
+                    stderr_sink=eval_err_sink,
+                )
+                combined_eval = f"{eval_out}\n{eval_err}"
+                (run_dir / "eval_output.log").write_text(combined_eval, encoding="utf-8")
 
-            eval_summary = eval_specs.grade_eval_output(
-                repo=repo,
-                output=combined_eval,
-                fail_to_pass=fail_to_pass,
-                pass_to_pass=pass_to_pass,
-                exit_code=eval_rc,
-                test_directives=test_directives,
-            )
-            if repo == "django/django":
-                eval_summary["test_modules"] = list(test_directives)
+                eval_summary = eval_specs.grade_eval_output(
+                    repo=repo,
+                    output=combined_eval,
+                    fail_to_pass=fail_to_pass,
+                    pass_to_pass=pass_to_pass,
+                    exit_code=eval_rc,
+                    test_directives=test_directives,
+                )
+                if repo == "django/django":
+                    eval_summary["test_modules"] = list(test_directives)
+            except Exception as eval_exc:
+                print(
+                    f"[Eval:{instance_id}] Evaluation exec interrupted/timed out: {eval_exc!r}",
+                    file=sys.stderr,
+                )
+                partial_eval = (
+                    f"{''.join(eval_out_sink)}\n{''.join(eval_err_sink)}\n"
+                    f"[Eval Exception] {eval_exc!r}\n"
+                )
+                (run_dir / "eval_output.log").write_text(partial_eval, encoding="utf-8")
+                eval_summary = {
+                    "evaluated": True,
+                    "exit_code": 124,
+                    "runner_exit_zero": False,
+                    "test_directives": test_directives,
+                    "fail_to_pass": None,
+                    "pass_to_pass": None,
+                    "resolved": False,
+                    "eval_error": repr(eval_exc),
+                }
+                if repo == "django/django":
+                    eval_summary["test_modules"] = list(test_directives)
         finally:
             print(f"[Sandbox:{instance_id}] Terminating Evaluation Sandbox...")
             eval_sb.terminate()
@@ -515,7 +625,7 @@ def build_arg_parser() -> argparse.ArgumentParser:
     parser.add_argument("--model", default="hy4")
     parser.add_argument("--max-turns", type=int, default=45)
     parser.add_argument("--agent-timeout", type=int, default=540)
-    parser.add_argument("--sandbox-timeout", type=int, default=600)
+    parser.add_argument("--sandbox-timeout", type=int, default=780)
     parser.add_argument("--ws-url", default=os.environ.get("DALEMBERT_WS_URL", DEFAULT_WS_URL))
     parser.add_argument("--enginedge-bin", default=DEFAULT_ENGINEDGE_BIN)
     parser.add_argument("--modal-bin", default=DEFAULT_MODAL_BIN)

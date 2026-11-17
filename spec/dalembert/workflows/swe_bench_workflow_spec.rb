@@ -46,6 +46,21 @@ Task ID: hub_session_swe_bench_routing_and_budget_005
 ================================================================================
 =end
 
+=begin
+================================================================================
+Test Suite: Retry Turn-Count Isolation & Stage 1-3 Hardened Prompts
+Task ID: harden_swe_bench_retry_prompts_and_sandbox_isolation_011
+
+1. Problem / Feature Tested:
+   - Verifies that transient HTTP `429` retries inside `Dalembert::Agent`'s
+     LLM retry wrapper run underneath `SweBenchWorkflow`'s outer turn tracker so
+     1 logical turn with 2 transient retries still counts as 1 logical turn.
+   - Verifies Stage 1, Stage 2, and Stage 3 system prompts contain anti-archaeology,
+     single-line `run_verification`, `replace_symbol` AST safety, and anti-revert /
+     anti-full-sweep early-exit rules.
+================================================================================
+=end
+
 module RubyLLM
   class LLMService
     attr_reader :model unless method_defined?(:model)
@@ -380,6 +395,16 @@ RSpec.describe Dalembert::Workflows::SweBenchWorkflow do
       expect(stage_system_prompts[:swe_bench_locate]).to include("Stage turn budget: up to 6 turns. Call 'send_message'")
       expect(stage_system_prompts[:swe_bench_reproduce]).to include("Stage turn budget: up to 5 turns. Call 'send_message'")
       expect(stage_system_prompts[:swe_bench_patch_and_verify]).to include("Stage turn budget: up to 40 turns. Call 'send_message'")
+
+      # Assert Stage 1-3 hardened prompt rules
+      expect(stage_system_prompts[:swe_bench_locate]).to include("Do NOT run git history archaeology")
+      expect(stage_system_prompts[:swe_bench_reproduce]).to include("Command rules for run_verification: pass single-line commands only")
+      expect(stage_system_prompts[:swe_bench_reproduce]).to include("git show, git stash, git grep")
+      expect(stage_system_prompts[:swe_bench_patch_and_verify]).to include("NEVER pass a class name to `replace_symbol`")
+      expect(stage_system_prompts[:swe_bench_patch_and_verify]).to include("__getstate__")
+      expect(stage_system_prompts[:swe_bench_patch_and_verify]).to include("Pass single-line commands only to `run_verification`")
+      expect(stage_system_prompts[:swe_bench_patch_and_verify]).to include("CRITICAL ANTI-TIMEOUT RULE: Stage 2 ALREADY proved Red Light")
+      expect(stage_system_prompts[:swe_bench_patch_and_verify]).to include("NEVER temporarily revert your fix")
     end
 
     it "tracks actual LLM invocations via call_with_system wrapping and forwards args cleanly" do
@@ -426,6 +451,81 @@ RSpec.describe Dalembert::Workflows::SweBenchWorkflow do
       expect(forwarded_calls.size).to eq(5)
       expect(forwarded_calls.first[3]).to eq(tools: [])
       expect(forwarded_calls.last[3]).to eq({})
+    end
+
+    it "counts a logical LLM turn only ONCE even when agent.llm retries transient 429 errors internally" do
+      stage_budgets = {}
+      recorded_sleeps = []
+      http_attempts_by_stage = Hash.new(0)
+
+      retryable_llm_cls = Class.new(RubyLLM::LLMService) do
+        attr_reader :model
+        attr_accessor :handler
+
+        def initialize(**args)
+          @model = args[:model]
+        end
+
+        def call_with_system(sys, msgs, **opts, &block)
+          @handler.call(sys, msgs, **opts, &block)
+        end
+      end
+
+      retry_workflow = described_class.new(
+        profile_name: "deepseek/deepseek-reasoner",
+        tools: all_local_tools,
+        cloud_tools: [],
+        llm_max_retries: 4,
+        llm_retry_delays: [2.0, 5.0, 12.0, 25.0],
+        llm_sleep_fn: ->(d) { recorded_sleeps << d }
+      )
+
+      allow(RubyLLM::LLMService).to receive(:new) do |**init_opts|
+        retryable_llm_cls.allocate.tap { |o| o.send(:initialize, **init_opts) }
+      end
+
+      allow(Dalembert::Agent).to receive(:new).and_wrap_original { |orig, **kwargs|
+        agent = orig.call(**kwargs)
+        stage_name = kwargs[:name]
+        stage_budgets[stage_name] = kwargs[:max_turns]
+
+        agent.llm.handler = lambda do |_sys, _msgs, **_opts|
+          http_attempts_by_stage[stage_name] += 1
+          if stage_name == :swe_bench_locate && http_attempts_by_stage[stage_name] <= 2
+            raise RuntimeError, "HTTP 429 Too Many Requests"
+          end
+
+          "llm_ok"
+        end
+
+        allow(agent).to receive(:execute) do |_ctx, _stage_prompt|
+          case stage_name
+          when :swe_bench_locate
+            # 1 logical turn that suffers 2 transient 429 retries (3 raw HTTP attempts)
+            agent.llm.call_with_system("sys", ["turn1"])
+            "Locate complete after transient 429 retries"
+          when :swe_bench_reproduce
+            agent.llm.call_with_system("sys", ["turn1"])
+            "Reproduce complete"
+          when :swe_bench_patch_and_verify
+            agent.llm.call_with_system("sys", ["turn1"])
+            "Patch complete"
+          end
+        end
+
+        agent
+      }
+
+      res = retry_workflow.execute(context, "Fix bug despite transient 429")
+      expect(res).to eq("Patch complete")
+      expect(http_attempts_by_stage[:swe_bench_locate]).to eq(3)
+      expect(recorded_sleeps).to eq([2.0, 5.0])
+      # Stage 1 used 1 logical turn (45 - 1 = 44), Stage 2 used 1 logical turn (44 - 1 = 43)!
+      expect(stage_budgets).to eq(
+        swe_bench_locate: 6,
+        swe_bench_reproduce: 5,
+        swe_bench_patch_and_verify: 43
+      )
     end
 
     it "advances gracefully with auto-handoff when Stage 1 exceeds its sub-stage turn cap" do
